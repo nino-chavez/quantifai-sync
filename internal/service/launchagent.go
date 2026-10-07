@@ -146,14 +146,17 @@ func (la *LaunchAgent) Install() error {
 }
 
 // bootoutTimeout bounds the wait for launchd to remove a booted-out agent.
-const bootoutTimeout = 10 * time.Second
+// launchctl bootout returns before the job is gone, and launchd gives a job
+// 20s (its default ExitTimeOut) to exit before SIGKILL, so wait longer.
+const bootoutTimeout = 30 * time.Second
 
 // reloadAgent starts the agent in plist, replacing any loaded instance so a
 // reinstall runs the new binary and the new plist. "launchctl load" on a
 // loaded label fails or leaves the old process running, and "kickstart -k"
 // restarts the process without rereading a changed plist. So it boots out
-// a loaded agent, waits until launchd no longer lists it (bootstrap right
-// after bootout can otherwise fail with an I/O error), then bootstraps.
+// a loaded agent, waits until launchd no longer lists it (bootout is
+// asynchronous, and bootstrap before the job is gone fails with
+// "Bootstrap failed: 5: Input/output error"), then bootstraps.
 func reloadAgent(label, plist string) error {
 	domain := fmt.Sprintf("gui/%d", os.Getuid())
 	target := domain + "/" + label
@@ -161,11 +164,10 @@ func reloadAgent(label, plist string) error {
 		if out, err := exec.Command("launchctl", "bootout", target).CombinedOutput(); err != nil && agentLoaded(target) {
 			return fmt.Errorf("launchctl bootout %s: %s: %w", target, out, err)
 		}
+		// Bootstrap even after a timeout: returning here would leave the
+		// agent booted out and stopped.
 		deadline := time.Now().Add(bootoutTimeout)
-		for agentLoaded(target) {
-			if time.Now().After(deadline) {
-				return fmt.Errorf("launchctl bootout %s: still loaded after %s", target, bootoutTimeout)
-			}
+		for agentLoaded(target) && time.Now().Before(deadline) {
 			time.Sleep(100 * time.Millisecond)
 		}
 	}
