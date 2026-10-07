@@ -14,6 +14,17 @@ import (
 // normal check interval.
 const defaultRetryBase = time.Minute
 
+// defaultStallTimeout is how long an archive download may go without
+// receiving any data before it is abandoned.
+const defaultStallTimeout = 30 * time.Second
+
+// stalledError is an archive download that received no data for after.
+type stalledError struct{ after time.Duration }
+
+func (e *stalledError) Error() string {
+	return fmt.Sprintf("download stalled: no data received for %s", e.after)
+}
+
 // statusError is a non-200 response from GitHub.
 type statusError struct {
 	msg         string
@@ -32,10 +43,14 @@ func newStatusError(resp *http.Response, format string, args ...any) error {
 }
 
 // retryable reports whether a failed check is worth retrying soon: a
-// network failure (timeout, refused connection, TLS handshake), a GitHub
-// server error, or rate limiting. Anything else, such as a checksum
-// mismatch or a missing asset, would fail the same way again.
+// network failure (timeout, refused connection, TLS handshake, a stalled
+// download), a GitHub server error, or rate limiting. Anything else, such
+// as a checksum mismatch or a missing asset, would fail the same way again.
 func retryable(err error) bool {
+	var stalled *stalledError
+	if errors.As(err, &stalled) {
+		return true
+	}
 	var se *statusError
 	if errors.As(err, &se) {
 		return se.code >= 500 || se.code == http.StatusTooManyRequests || se.rateLimited

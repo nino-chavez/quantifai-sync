@@ -7,6 +7,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,7 +33,9 @@ type GithubUpdater struct {
 	updateChannel string
 	repo          string // "owner/repo"
 	interval      time.Duration
-	client        *http.Client
+	// client's Timeout bounds the small requests (release lookup, checksum
+	// files). The archive download replaces it with a stall timeout.
+	client *http.Client
 
 	// executable locates the binary to replace; nil means os.Executable.
 	executable func() (string, error)
@@ -42,6 +45,9 @@ type GithubUpdater struct {
 
 	// retryBase overrides defaultRetryBase (tests).
 	retryBase time.Duration
+
+	// stallTimeout overrides defaultStallTimeout (tests).
+	stallTimeout time.Duration
 }
 
 // NewGithubUpdater creates a GithubUpdater that checks the given repo
@@ -284,17 +290,41 @@ func (g *GithubUpdater) latestTag(ctx context.Context) (string, error) {
 	return loc[i+len(marker):], nil
 }
 
-// downloadFile downloads a URL to a local file path.
+// downloadFile downloads a URL to a local file path. The download has no
+// overall time limit, so a slow link can finish it; it is abandoned only
+// when no data arrives for the stall timeout, including while waiting for
+// the response to start.
 func (g *GithubUpdater) downloadFile(ctx context.Context, url, destPath string) error {
+	stall := g.stallTimeout
+	if stall <= 0 {
+		stall = defaultStallTimeout
+	}
+	ctx, cancel := context.WithCancelCause(ctx)
+	defer cancel(nil)
+	timer := time.AfterFunc(stall, func() { cancel(&stalledError{after: stall}) })
+	defer timer.Stop()
+	// stalled reports a stall as the error. Go before 1.23 surfaces it from
+	// the body read as a bare context.Canceled, which is not retryable. A
+	// shutdown keeps its own error.
+	stalled := func(err error) error {
+		var se *stalledError
+		if errors.As(context.Cause(ctx), &se) {
+			return se
+		}
+		return err
+	}
+
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("User-Agent", "quantifai-sync/"+g.version)
 
-	resp, err := g.client.Do(req)
+	client := *g.client
+	client.Timeout = 0
+	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return stalled(err)
 	}
 	defer resp.Body.Close()
 
@@ -308,10 +338,25 @@ func (g *GithubUpdater) downloadFile(ctx context.Context, url, destPath string) 
 	}
 	defer f.Close()
 
-	if _, err := io.Copy(f, resp.Body); err != nil {
-		return err
+	body := &progressReader{r: resp.Body, progress: func() { timer.Reset(stall) }}
+	if _, err := io.Copy(f, body); err != nil {
+		return stalled(err)
 	}
 	return f.Close()
+}
+
+// progressReader calls progress whenever a read returns data.
+type progressReader struct {
+	r        io.Reader
+	progress func()
+}
+
+func (p *progressReader) Read(b []byte) (int, error) {
+	n, err := p.r.Read(b)
+	if n > 0 {
+		p.progress()
+	}
+	return n, err
 }
 
 // verifyChecksum downloads the .sha256 file and verifies the binary matches.
