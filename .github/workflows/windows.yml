@@ -170,6 +170,12 @@ jobs:
           }
           Get-Content "$qs\agent.log" | Select-String 'update|supervisor|starting quantifai'
           Get-ChildItem $qs -Filter 'quantifai-sync.exe*' | Format-Table Name, Length -AutoSize | Out-String
+          # The supervisor must be running the new binary too, not the old one
+          # it was started from, which the update renamed to .old-<n>.
+          Start-Sleep 3
+          $procs = @(Get-Process quantifai-sync -ErrorAction SilentlyContinue)
+          $procs | Format-Table Id, Path, StartTime -AutoSize | Out-String
+          $stale = @($procs | Where-Object { $_.Path -match '\.old(-\d+)?$' })
           & $tool uninstall
           Start-Sleep 2
           $left = Get-Process quantifai-sync -ErrorAction SilentlyContinue
@@ -177,6 +183,8 @@ jobs:
           $log = Get-Content "$qs\agent.log" -Raw
           if ($log -notmatch '"version":"v0.2.9-ci"') { Write-Error 'agent never started as v0.2.9-ci'; exit 1 }
           if ($log -notmatch 'exiting so the supervisor starts the new binary') { Write-Error 'agent did not hand over to the supervisor'; exit 1 }
+          if ($stale.Count -ne 0) { Write-Error "still running the replaced binary: $($stale.Path -join ', ')"; exit 1 }
+          if ($procs.Count -ne 2) { Write-Error "want a supervisor and an agent after the update, found $($procs.Count) processes"; exit 1 }
           if ($left) { $left | Format-Table Id, StartTime; Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
-          "updated from v0.2.9-ci to $latest under the supervisor; nothing left running"
+          "updated from v0.2.9-ci to $latest; supervisor and agent both run the new binary; nothing left running"
           exit 0
