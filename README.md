@@ -30,7 +30,8 @@ On Windows, `install` registers a Task Scheduler task that starts the agent at l
 user who ran `install`, and stores the API key in that user's Credential Manager. Run it from
 an ordinary prompt, not an elevated one: no administrator rights are needed, and elevating with
 another account's credentials would install the agent for that account. It prints the account
-it registered.
+it registered and where the agent's output goes: `%LOCALAPPDATA%\quantifai\quantifai-sync.log`
+(the Windows counterpart of `~/Library/Logs/quantifai-sync.log`).
 
 ## What it does
 

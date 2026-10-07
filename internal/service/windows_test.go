@@ -167,3 +167,10 @@ func TestSessionUserMatchesProcessUser(t *testing.T) {
 		t.Fatal("an account that cannot be looked up must not block install")
 	}
 }
+
+func TestWindowsLogPathUsesLocalAppData(t *testing.T) {
+	t.Setenv("LOCALAPPDATA", `C:\Users\ana\AppData\Local`)
+	if got, want := WindowsLogPath(), `C:\Users\ana\AppData\Local\quantifai\quantifai-sync.log`; got != want {
+		t.Fatalf("WindowsLogPath() = %q, want %q", got, want)
+	}
+}
