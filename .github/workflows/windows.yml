@@ -26,6 +26,34 @@ jobs:
         run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
       - name: Supervisor (crash restart, no orphaned agent)
         run: go test -count=1 -v -run "TestSupervis" ./cmd/
+      # No API key yet (fresh runner, before any step stores one): the agent
+      # must wait for a key, not exit, so the supervisor does not restart it
+      # every 10 seconds. The same processes must still be running 25s on.
+      - name: Missing API key does not restart-loop
+        shell: pwsh
+        run: |
+          $qs = Join-Path $env:RUNNER_TEMP 'qsk'
+          $exe = Join-Path $qs 'quantifai-sync.exe'
+          New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
+          go build -o $exe .
+          $fwd = $qs -replace '\\', '/'
+          Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
+            "api_url = 'http://127.0.0.1:9'",
+            "watch_dir = '$fwd/watch'"
+          )
+          & $exe install
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          Start-Sleep 5
+          $before = (Get-Process quantifai-sync -ErrorAction SilentlyContinue).Id | Sort-Object
+          Start-Sleep 25
+          $after = (Get-Process quantifai-sync -ErrorAction SilentlyContinue).Id | Sort-Object
+          "processes at 5s:  $($before -join ', ')"
+          "processes at 30s: $($after -join ', ')"
+          & $exe uninstall
+          if (@($before).Count -ne 2) { Write-Error 'want a supervisor and an agent running while the key is missing'; exit 1 }
+          if (($before -join ',') -ne ($after -join ',')) { Write-Error 'agent was restarted while waiting for a key'; exit 1 }
+          'agent waited for its key without being restarted'
+          exit 0
       # End to end on the runner (never in `go test`, which a developer runs on
       # their own machine): install registers the QuantifaiSync logon task and
       # stores the key in Credential Manager; the agent must start as this user,
@@ -91,13 +119,20 @@ jobs:
       # task, so cleanup uses this commit's build from the previous step.
       - name: Self-update under the logon task
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $qs = Join-Path $env:RUNNER_TEMP 'qsu'
           $exe = Join-Path $qs 'quantifai-sync.exe'
           $tool = Join-Path $env:RUNNER_TEMP 'qs\quantifai-sync.exe'
           New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
           go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.2.9-ci" -o $exe .
-          $latest = (Invoke-RestMethod https://api.github.com/repos/nino-chavez/quantifai-sync/releases/latest).tag_name
+          # Authenticated: the runner's shared IP can exhaust the unauthenticated limit.
+          try {
+            $latest = (Invoke-RestMethod https://api.github.com/repos/nino-chavez/quantifai-sync/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }).tag_name
+          } catch {
+            Write-Error "releases/latest lookup failed: HTTP $($_.Exception.Response.StatusCode.value__) $($_.ErrorDetails.Message)"; exit 1
+          }
           "latest release: $latest"
           $fwd = $qs -replace '\\', '/'
           Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
