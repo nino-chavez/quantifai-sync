@@ -66,7 +66,7 @@ func (w *Windows) Install() error {
 	// Elevating with another administrator's credentials runs install as
 	// that administrator, inside the signed-in user's session. The task and
 	// the key would then belong to the administrator instead.
-	if signedIn := sessionUser(); signedIn != "" && !strings.EqualFold(signedIn, w.user) {
+	if signedIn := sessionUser(); signedIn != "" && otherAccount(signedIn) {
 		return fmt.Errorf("service: install is running as %s, but %s is signed in to this session; "+
 			"the agent runs as the account that installs it, so run install as %s from a prompt that is not elevated", w.user, signedIn, signedIn)
 	}
@@ -175,6 +175,26 @@ func sessionUser() string {
 		return ""
 	}
 	return get(wtsDomainName) + `\` + name
+}
+
+// otherAccount reports whether name is a different account from the one
+// this process runs as. It compares SIDs, since the same account can be
+// spelled differently (domain, Microsoft or Entra ID accounts), and says
+// no when either account cannot be looked up, so a lookup failure never
+// blocks an install.
+func otherAccount(name string) bool {
+	cur, err := user.Current()
+	if err != nil {
+		return false
+	}
+	if strings.EqualFold(name, cur.Username) {
+		return false
+	}
+	other, err := user.Lookup(name)
+	if err != nil {
+		return false
+	}
+	return other.Uid != cur.Uid
 }
 
 // removeService stops and deletes a Windows Service if it exists.

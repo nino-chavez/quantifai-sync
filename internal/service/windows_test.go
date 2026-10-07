@@ -125,4 +125,10 @@ func TestSessionUserMatchesProcessUser(t *testing.T) {
 	if got != "" && !strings.EqualFold(got, u.Username) {
 		t.Fatalf("session user %q differs from process user %q in a plain test run", got, u.Username)
 	}
+	if got != "" && otherAccount(got) {
+		t.Fatalf("otherAccount(%q) = true for this process's own account", got)
+	}
+	if otherAccount(`NO-SUCH-DOMAIN\no-such-user`) {
+		t.Fatal("an account that cannot be looked up must not block install")
+	}
 }
