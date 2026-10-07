@@ -38,7 +38,8 @@ WantedBy=default.target
 
 // Systemd implements the Installer interface for Linux.  It generates a
 // systemd user unit at ~/.config/systemd/user/quantifai-sync.service and
-// manages it via systemctl --user enable/disable --now.
+// manages it via systemctl --user (enable + restart to install,
+// disable --now to uninstall).
 type Systemd struct {
 	unitPath   string
 	binaryPath string
@@ -69,7 +70,8 @@ func (s *Systemd) GenerateUnit() string {
 	return fmt.Sprintf(unitTemplate, s.binaryPath)
 }
 
-// Install writes the unit file, reloads systemd, and enables/starts the service.
+// Install writes the unit file, reloads systemd, enables the service, and
+// restarts it so a reinstall runs the new binary.
 func (s *Systemd) Install() error {
 	// Ensure the systemd user unit directory exists
 	dir := filepath.Dir(s.unitPath)
@@ -87,9 +89,14 @@ func (s *Systemd) Install() error {
 		return fmt.Errorf("service: systemctl daemon-reload: %s: %w", string(out), err)
 	}
 
-	// Enable and start the service
-	if out, err := exec.Command("systemctl", "--user", "enable", "--now", systemdUnitName).CombinedOutput(); err != nil {
-		return fmt.Errorf("service: systemctl enable --now: %s: %w", string(out), err)
+	// Enable at login, then restart: "enable --now" starts a stopped unit
+	// but leaves a running one alone, so a reinstall kept running the old
+	// binary. restart starts a stopped unit and replaces a running one.
+	if out, err := exec.Command("systemctl", "--user", "enable", systemdUnitName).CombinedOutput(); err != nil {
+		return fmt.Errorf("service: systemctl enable: %s: %w", string(out), err)
+	}
+	if out, err := exec.Command("systemctl", "--user", "restart", systemdUnitName).CombinedOutput(); err != nil {
+		return fmt.Errorf("service: systemctl restart: %s: %w", string(out), err)
 	}
 
 	return nil
