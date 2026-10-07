@@ -1,0 +1,1 @@
+{"type": "assistant", "sessionId": "s9", "uuid": "top-1", "timestamp": "2026-10-05T00:00:00.000Z", "message": {"role": "assistant", "content": [{"type": "text", "text": "x"}], "model": "claude-opus-4-6", "usage": {"input_tokens": 1, "output_tokens": 1, "cache_read_input_tokens": 0, "cache_creation_input_tokens": 0}}}

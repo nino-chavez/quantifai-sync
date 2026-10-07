@@ -32,6 +32,11 @@ type CommitEvent struct {
 	LinkedSessionID   string   `json:"linked_session_id,omitempty"`
 	MergeCommit       bool     `json:"merge_commit"`
 	CommitMessageHash string   `json:"commit_message_hash"`
+	// RepoPath is the repository's top-level directory and Subject the
+	// commit's first line. The server's gitEvents need both; events queued
+	// by older builds lack them.
+	RepoPath string `json:"repo_path,omitempty"`
+	Subject  string `json:"subject,omitempty"`
 }
 
 // gitCmdTimeout is the maximum duration for any single git subprocess.
@@ -74,6 +79,10 @@ func CaptureCommit() (*CommitEvent, error) {
 	// commit message hash (SHA-256 of full message)
 	h := sha256.Sum256([]byte(body))
 	ev.CommitMessageHash = fmt.Sprintf("%x", h)
+
+	// repository top level and subject line, for the server's gitEvents
+	ev.RepoPath, _ = gitOutput("rev-parse", "--show-toplevel")
+	ev.Subject, _ = gitOutput("log", "-1", "--format=%s")
 
 	// remote URL (best effort -- may be empty for local-only repos)
 	remote, _ := gitOutput("remote", "get-url", "origin")
