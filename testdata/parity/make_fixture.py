@@ -63,6 +63,11 @@ write(f'{A}/s2.jsonl', [
     asst('s2', 'a2-1', '2026-10-02T08:00:00.000Z', None, u(100, 200, 300, 400), cwd='/Users/test/repo-alpha/.claude/worktrees/agent-x'),
     asst('s2', 'a2-2', '2026-10-02T08:01:00.000Z', 'some-future-model', u(1, 2, 3, 4), entry='', tools=['WebFetch', 'WebFetch']),
     asst('s2', 'a2-3', '2026-10-02T07:59:00.000Z', 'Claude-HAIKU-5', u(9, 8, 7, 6)),
+    # Haiku 5.5 is priced by prompt length: exactly 100,000 prompt tokens
+    # stays on short-prompt rates, 100,001 moves every category up.
+    asst('s2', 'a2-4', '2026-10-02T08:02:00.000Z', 'claude-haiku-5-5', u(1000, 50, 98000, 1000)),
+    asst('s2', 'a2-5', '2026-10-02T08:03:00.000Z', 'claude-haiku-5-5', u(1001, 50, 98000, 1000)),
+    asst('s2', 'a2-6', '2026-10-02T08:04:00.000Z', 'claude-opus-5-5', u(10, 20, 30, 40)),
 ])
 
 B = '-Users-test-no-cwd'

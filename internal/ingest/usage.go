@@ -6,22 +6,60 @@ import (
 	"strings"
 )
 
-// pricingRow is one tier of the server's ANTHROPIC_PRICING_TABLE
-// (apps/app/src/lib/pricing/anthropic-pricing.ts): list price per 1M tokens.
-type pricingRow struct {
-	match         string
+// pricingRates is one set of list prices per 1M tokens. cacheCreation is the
+// 5-minute cache-write rate.
+type pricingRates struct {
 	input, output float64
 	cacheRead     float64
 	cacheCreation float64
 }
 
-// First match wins, by substring on the lowercased model. Unknown models
-// fall back to the sonnet row, as the server does.
-var pricingTable = []pricingRow{
-	{"opus", 15.0, 75.0, 1.5, 18.75},
-	{"haiku", 0.8, 4.0, 0.08, 1.0},
-	{"sonnet", 3.0, 15.0, 0.3, 3.75},
+// pricingRow is one tier of the server's ANTHROPIC_PRICING_TABLE
+// (apps/app/src/lib/pricing/anthropic-pricing.ts).
+type pricingRow struct {
+	match string
+	pricingRates
+	// longPromptOver > 0 means a request whose prompt (input + cache read +
+	// cache creation) exceeds it pays longPrompt for every category.
+	longPromptOver int64
+	longPrompt     pricingRates
 }
+
+func row(match string, in, out, cacheRead, cacheCreation float64) pricingRow {
+	return pricingRow{match: match, pricingRates: pricingRates{in, out, cacheRead, cacheCreation}}
+}
+
+// First match wins, by substring on the lowercased model, so a version comes
+// before any key it contains. The bare family rows at the end catch older
+// versions at legacy rates. Unknown models fall back to the sonnet row, as
+// the server does. Keep this in the server table's order and values.
+var pricingTable = []pricingRow{
+	row("fable-5-1", 10, 50, 0.25, 12.5),
+	row("mythos-5-1", 10, 50, 0.25, 12.5),
+	row("fable-5", 10, 50, 1, 12.5),
+	row("mythos-5", 10, 50, 1, 12.5),
+	row("opus-5-5", 4, 20, 0.2, 5),
+	row("opus-5", 5, 25, 0.5, 6.25),
+	row("opus-4-8", 5, 25, 0.5, 6.25),
+	row("opus-4-7", 5, 25, 0.5, 6.25),
+	row("opus-4-6", 5, 25, 0.5, 6.25),
+	row("opus-4-5", 5, 25, 0.5, 6.25),
+	row("opus-4", 15, 75, 1.5, 18.75),
+	row("sonnet-5-5", 2, 10, 0.2, 2.5),
+	row("sonnet-5", 2, 10, 0.2, 2.5),
+	{
+		match:          "haiku-5-5",
+		pricingRates:   pricingRates{0.1, 0.5, 0.01, 0.125},
+		longPromptOver: 100_000,
+		longPrompt:     pricingRates{0.5, 2.5, 0.05, 0.625},
+	},
+	row("haiku-4-5", 1, 5, 0.1, 1.25),
+	row("opus", 15, 75, 1.5, 18.75),
+	row("haiku", 0.8, 4, 0.08, 1),
+	row("sonnet", 3, 15, 0.3, 3.75),
+}
+
+var fallbackRow = pricingTable[len(pricingTable)-1]
 
 // EstimateCost ports estimateAnthropicCost. Each term is converted with
 // float64() so the compiler cannot fuse it into a multiply-add on arm64;
@@ -29,17 +67,21 @@ var pricingTable = []pricingRow{
 // must match the reference importer's exactly.
 func EstimateCost(model string, in, out, cacheRead, cacheCreation int64) float64 {
 	m := strings.ToLower(model)
-	row := pricingTable[2]
+	tier := fallbackRow
 	for _, r := range pricingTable {
 		if strings.Contains(m, r.match) {
-			row = r
+			tier = r
 			break
 		}
 	}
-	t1 := float64(float64(in) / 1_000_000 * row.input)
-	t2 := float64(float64(out) / 1_000_000 * row.output)
-	t3 := float64(float64(cacheRead) / 1_000_000 * row.cacheRead)
-	t4 := float64(float64(cacheCreation) / 1_000_000 * row.cacheCreation)
+	rates := tier.pricingRates
+	if tier.longPromptOver > 0 && in+cacheRead+cacheCreation > tier.longPromptOver {
+		rates = tier.longPrompt
+	}
+	t1 := float64(float64(in) / 1_000_000 * rates.input)
+	t2 := float64(float64(out) / 1_000_000 * rates.output)
+	t3 := float64(float64(cacheRead) / 1_000_000 * rates.cacheRead)
+	t4 := float64(float64(cacheCreation) / 1_000_000 * rates.cacheCreation)
 	return t1 + t2 + t3 + t4
 }
 

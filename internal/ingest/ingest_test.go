@@ -3,6 +3,7 @@ package ingest
 import (
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -254,15 +255,34 @@ func TestEstimateCost(t *testing.T) {
 		model string
 		want  float64
 	}{
-		{"claude-opus-4-6", 15 + 75 + 1.5 + 18.75},
-		{"Claude-HAIKU-5", 0.8 + 4 + 0.08 + 1},
+		{"claude-opus-4-6", 5 + 25 + 0.5 + 6.25},
+		{"claude-opus-5-5", 4 + 20 + 0.2 + 5},
+		{"claude-opus-4-1-20250805", 15 + 75 + 1.5 + 18.75},
+		{"claude-haiku-4-5-20251001", 1 + 5 + 0.1 + 1.25},
+		{"Claude-HAIKU-5", 0.8 + 4 + 0.08 + 1}, // family row, legacy rate
 		{"claude-sonnet-4-6", 3 + 15 + 0.3 + 3.75},
+		{"claude-sonnet-5-5", 2 + 10 + 0.2 + 2.5},
 		{"unknown", 3 + 15 + 0.3 + 3.75}, // sonnet fallback
+		// 3M prompt tokens is over Haiku 5.5's 100k cutoff.
+		{"claude-haiku-5-5", 0.5 + 2.5 + 0.05 + 0.625},
 	}
 	for _, c := range cases {
-		if got := EstimateCost(c.model, 1e6, 1e6, 1e6, 1e6); got != c.want {
+		if got := EstimateCost(c.model, 1e6, 1e6, 1e6, 1e6); math.Abs(got-c.want) > 1e-9 {
 			t.Errorf("%s: got %v want %v", c.model, got, c.want)
 		}
+	}
+}
+
+func TestEstimateCostHaikuPromptCutoff(t *testing.T) {
+	// 100,000 prompt tokens is not over the cutoff; 100,001 is, and then
+	// every category, output included, moves to long-prompt rates.
+	at := EstimateCost("claude-haiku-5-5", 1_000, 1_000_000, 98_000, 1_000)
+	if want := (1_000*0.1+98_000*0.01+1_000*0.125)/1e6 + 0.5; math.Abs(at-want) > 1e-12 {
+		t.Errorf("at cutoff: got %v want %v", at, want)
+	}
+	over := EstimateCost("claude-haiku-5-5", 1_001, 1_000_000, 98_000, 1_000)
+	if want := (1_001*0.5+98_000*0.05+1_000*0.625)/1e6 + 2.5; math.Abs(over-want) > 1e-12 {
+		t.Errorf("over cutoff: got %v want %v", over, want)
 	}
 }
 
