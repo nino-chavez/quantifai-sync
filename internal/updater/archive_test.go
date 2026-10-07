@@ -106,6 +106,13 @@ var releaseLayout = map[string][2]string{
 // a count of archive downloads.
 func fakeRelease(t *testing.T) (*GithubUpdater, string, *atomic.Int32) {
 	t.Helper()
+	return fakeReleaseWith(t, "per-file")
+}
+
+// fakeReleaseWith is fakeRelease with a choice of checksum files:
+// "per-file" (<asset>.sha256), "consolidated" (checksums.txt) or "none".
+func fakeReleaseWith(t *testing.T, checksums string) (*GithubUpdater, string, *atomic.Int32) {
+	t.Helper()
 	layout, ok := releaseLayout[runtime.GOOS+"/"+runtime.GOARCH]
 	if !ok {
 		t.Skipf("no release asset for %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -119,31 +126,48 @@ func fakeRelease(t *testing.T) (*GithubUpdater, string, *atomic.Int32) {
 	sum := sha256.Sum256(data)
 
 	downloads := new(atomic.Int32)
+	apiCalls := new(atomic.Int32)
 	mux := http.NewServeMux()
-	var srvURL string
-	mux.HandleFunc("/repos/o/r/releases/latest", func(w http.ResponseWriter, r *http.Request) {
-		var assets []string
-		for _, l := range releaseLayout {
-			for _, name := range []string{l[0], l[0] + ".sha256"} {
-				assets = append(assets, fmt.Sprintf(`{"name":%q,"browser_download_url":%q}`, name, srvURL+"/dl/"+name))
-			}
-		}
-		fmt.Fprintf(w, `{"tag_name":"v9.9.9","assets":[%s]}`, strings.Join(assets, ","))
+	// github.com answers releases/latest with a redirect to the tag.
+	mux.HandleFunc("/o/r/releases/latest", func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Location", "https://github.com/o/r/releases/tag/v9.9.9")
+		w.WriteHeader(http.StatusFound)
 	})
-	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
-		switch name := strings.TrimPrefix(r.URL.Path, "/dl/"); name {
+	mux.HandleFunc("/o/r/releases/download/v9.9.9/", func(w http.ResponseWriter, r *http.Request) {
+		switch name := strings.TrimPrefix(r.URL.Path, "/o/r/releases/download/v9.9.9/"); name {
 		case asset:
 			downloads.Add(1)
 			w.Write(data)
 		case asset + ".sha256":
+			if checksums != "per-file" {
+				http.NotFound(w, r)
+				return
+			}
 			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), asset)
+		case "checksums.txt":
+			if checksums != "consolidated" {
+				http.NotFound(w, r)
+				return
+			}
+			fmt.Fprintf(w, "0000  quantifai-sync-other\n%s  %s\n", hex.EncodeToString(sum[:]), asset)
+		case "SHA256SUMS":
+			http.NotFound(w, r)
 		default:
 			http.Error(w, "wrong platform asset requested: "+name, http.StatusTeapot)
 		}
 	})
+	// The REST API (rate-limited) must not be used at all.
+	mux.HandleFunc("/repos/", func(w http.ResponseWriter, r *http.Request) {
+		apiCalls.Add(1)
+		http.Error(w, "API used", http.StatusInternalServerError)
+	})
 	server := httptest.NewServer(mux)
 	t.Cleanup(server.Close)
-	srvURL = server.URL
+	t.Cleanup(func() {
+		if n := apiCalls.Load(); n != 0 {
+			t.Errorf("updater made %d REST API calls, want 0", n)
+		}
+	})
 
 	exe := filepath.Join(dir, "installed")
 	if err := os.WriteFile(exe, []byte("old binary"), 0755); err != nil {
@@ -236,5 +260,33 @@ func TestRunSignalsAppliedAndStops(t *testing.T) {
 	}
 	if n := downloads.Load(); n != 1 {
 		t.Fatalf("archive downloaded %d times, want 1", n)
+	}
+}
+
+// Without <asset>.sha256 the updater falls back to checksums.txt.
+func TestCheckAndApplyUsesConsolidatedChecksums(t *testing.T) {
+	t.Setenv(UpdatedToEnv, "")
+	g, exe, _ := fakeReleaseWith(t, "consolidated")
+	if applied, err := g.CheckAndApply(context.Background()); err != nil || !applied {
+		t.Fatalf("CheckAndApply = %v, %v; want true, nil", applied, err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "new binary v9.9.9" {
+		t.Fatalf("installed %q", got)
+	}
+}
+
+// With no checksum file at all the update is refused and nothing changes.
+func TestCheckAndApplyRefusesWithoutChecksum(t *testing.T) {
+	t.Setenv(UpdatedToEnv, "")
+	g, exe, _ := fakeReleaseWith(t, "none")
+	applied, err := g.CheckAndApply(context.Background())
+	if applied || err == nil || !strings.Contains(err.Error(), "no checksum file found") {
+		t.Fatalf("CheckAndApply = %v, %v; want false and a no-checksum error", applied, err)
+	}
+	if retryable(err) {
+		t.Fatal("a missing checksum must not be retried soon")
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "old binary" {
+		t.Fatalf("executable changed to %q without a checksum", got)
 	}
 }

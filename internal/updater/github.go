@@ -7,7 +7,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -45,18 +44,6 @@ type GithubUpdater struct {
 	retryBase time.Duration
 }
 
-// githubRelease is the subset of the GitHub Releases API response we need.
-type githubRelease struct {
-	TagName string        `json:"tag_name"`
-	Assets  []githubAsset `json:"assets"`
-}
-
-// githubAsset represents a single downloadable file attached to a release.
-type githubAsset struct {
-	Name               string `json:"name"`
-	BrowserDownloadURL string `json:"browser_download_url"`
-}
-
 // NewGithubUpdater creates a GithubUpdater that checks the given repo
 // for newer releases at the specified interval.
 func NewGithubUpdater(version, updateChannel, repo string, interval time.Duration, log *logger.Logger) *GithubUpdater {
@@ -86,12 +73,12 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 		"repo":            g.repo,
 	})
 
-	release, err := g.fetchLatestRelease(ctx)
+	tag, err := g.latestTag(ctx)
 	if err != nil {
-		return false, fmt.Errorf("fetch latest release: %w", err)
+		return false, fmt.Errorf("find latest release: %w", err)
 	}
 
-	latestVersion := normalizeVersion(release.TagName)
+	latestVersion := normalizeVersion(tag)
 	currentVersion := normalizeVersion(g.version)
 
 	if !isNewer(latestVersion, currentVersion) {
@@ -105,8 +92,8 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	// A release whose binary reports a version older than its tag (an
 	// unstamped build, or one built before tagging) would otherwise be
 	// installed again after every restart.
-	if os.Getenv(UpdatedToEnv) == release.TagName {
-		return false, fmt.Errorf("release %s was just installed but this binary reports %s; not installing it again (check the release binary's version stamp)", release.TagName, g.version)
+	if os.Getenv(UpdatedToEnv) == tag {
+		return false, fmt.Errorf("release %s was just installed but this binary reports %s; not installing it again (check the release binary's version stamp)", tag, g.version)
 	}
 
 	g.log.Info("update available", map[string]any{
@@ -116,24 +103,10 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 
 	assetName := expectedAssetName(runtime.GOOS, runtime.GOARCH)
 	checksumName := assetName + ".sha256"
-
-	assetURL, checksumURL, consolidatedChecksumURL := "", "", ""
-	for _, a := range release.Assets {
-		if a.Name == assetName {
-			assetURL = a.BrowserDownloadURL
-		}
-		if a.Name == checksumName {
-			checksumURL = a.BrowserDownloadURL
-		}
-		// Fallback: consolidated checksum file (checksums.txt or SHA256SUMS)
-		if a.Name == "checksums.txt" || a.Name == "SHA256SUMS" {
-			consolidatedChecksumURL = a.BrowserDownloadURL
-		}
-	}
-
-	if assetURL == "" {
-		return false, fmt.Errorf("no asset found for %s/%s in release %s", runtime.GOOS, runtime.GOARCH, release.TagName)
-	}
+	// Release files download from github.com directly by name; the REST
+	// API, rate-limited to 60 unauthenticated requests an hour per IP, is
+	// not involved.
+	base := fmt.Sprintf("https://github.com/%s/releases/download/%s/", g.repo, tag)
 
 	// Download the archive to a temp file
 	tmpFile, err := tempPath("quantifai-sync-update-*")
@@ -142,38 +115,38 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	}
 	defer os.Remove(tmpFile)
 
-	if err := g.downloadFile(ctx, assetURL, tmpFile); err != nil {
+	if err := g.downloadFile(ctx, base+assetName, tmpFile); err != nil {
+		if notFound(err) {
+			return false, fmt.Errorf("no asset %s in release %s: %w", assetName, tag, err)
+		}
 		return false, fmt.Errorf("download archive: %w", err)
 	}
 
-	// Verify checksum — reject update if no checksum source is available
-	if checksumURL != "" {
-		// Preferred: per-file .sha256 checksum
-		if err := g.verifyChecksum(ctx, checksumURL, tmpFile); err != nil {
-			g.log.Error("checksum verification failed", map[string]any{
-				"checksum_file": checksumName,
-				"error":         err.Error(),
-			})
-			return false, fmt.Errorf("checksum verification failed for %s: %w", checksumName, err)
+	// Verify the checksum: the per-file .sha256, else a consolidated
+	// checksums.txt or SHA256SUMS. Refuse the update if none exists.
+	err = g.verifyChecksum(ctx, base+checksumName, tmpFile)
+	if notFound(err) {
+		for _, name := range []string{"checksums.txt", "SHA256SUMS"} {
+			err = g.verifyConsolidatedChecksum(ctx, base+name, assetName, tmpFile)
+			if !notFound(err) {
+				break
+			}
 		}
-	} else if consolidatedChecksumURL != "" {
-		// Fallback: consolidated checksums.txt / SHA256SUMS
-		g.log.Info("using consolidated checksum file", nil)
-		if err := g.verifyConsolidatedChecksum(ctx, consolidatedChecksumURL, assetName, tmpFile); err != nil {
-			g.log.Error("consolidated checksum verification failed", map[string]any{
-				"asset": assetName,
-				"error": err.Error(),
+		if notFound(err) {
+			g.log.Warn("no checksum file found in release — refusing unverified update", map[string]any{
+				"expected": checksumName,
+				"release":  tag,
+				"asset":    assetName,
 			})
-			return false, fmt.Errorf("checksum verification failed for %s: %w", assetName, err)
+			return false, fmt.Errorf("no checksum file found for %s in release %s — refusing to apply unverified update", assetName, tag)
 		}
-	} else {
-		g.log.Warn("no checksum file found in release — refusing unverified update", map[string]any{
-			"expected":  checksumName,
-			"release":   release.TagName,
-			"asset":     assetName,
-			"num_assets": len(release.Assets),
+	}
+	if err != nil {
+		g.log.Error("checksum verification failed", map[string]any{
+			"asset": assetName,
+			"error": err.Error(),
 		})
-		return false, fmt.Errorf("no checksum file found for %s in release %s — refusing to apply unverified update", assetName, release.TagName)
+		return false, fmt.Errorf("checksum verification failed for %s: %w", assetName, err)
 	}
 	g.log.Info("checksum verified", map[string]any{"asset": assetName})
 
@@ -211,8 +184,8 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	}
 	// The running process is still the old binary until it restarts; record
 	// the installed version so later checks do not re-apply the same release.
-	g.version = release.TagName
-	os.Setenv(UpdatedToEnv, release.TagName)
+	g.version = tag
+	os.Setenv(UpdatedToEnv, tag)
 
 	g.log.Info("update applied successfully", map[string]any{
 		"from": currentVersion,
@@ -277,33 +250,38 @@ func (g *GithubUpdater) check(ctx context.Context, when string) (bool, error) {
 	return true, nil
 }
 
-// fetchLatestRelease queries the GitHub API for the latest release.
-func (g *GithubUpdater) fetchLatestRelease(ctx context.Context) (*githubRelease, error) {
-	url := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", g.repo)
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
+// latestTag returns the tag of the repository's latest release, read
+// from the redirect github.com/<repo>/releases/latest answers with
+// (Location: .../releases/tag/<tag>). GitHub documents that URL ("Linking
+// to releases"), and unlike the REST API it carries no 60-an-hour limit
+// for unauthenticated clients.
+func (g *GithubUpdater) latestTag(ctx context.Context) (string, error) {
+	url := fmt.Sprintf("https://github.com/%s/releases/latest", g.repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodHead, url, nil)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
 	req.Header.Set("User-Agent", "quantifai-sync/"+g.version)
 
-	resp, err := g.client.Do(req)
+	client := *g.client
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	resp, err := client.Do(req)
 	if err != nil {
-		return nil, err
+		return "", err
 	}
-	defer resp.Body.Close()
+	resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, newStatusError(resp, "GitHub API returned %d: %s", resp.StatusCode, string(body))
+	if resp.StatusCode < 300 || resp.StatusCode > 399 {
+		return "", newStatusError(resp, "latest release lookup returned HTTP %d", resp.StatusCode)
 	}
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, fmt.Errorf("decode response: %w", err)
+	loc := resp.Header.Get("Location")
+	const marker = "/releases/tag/"
+	i := strings.LastIndex(loc, marker)
+	if i < 0 || i+len(marker) == len(loc) {
+		// A repository with no release redirects to its releases page.
+		return "", fmt.Errorf("no published release (latest redirects to %s)", loc)
 	}
-	return &release, nil
+	return loc[i+len(marker):], nil
 }
 
 // downloadFile downloads a URL to a local file path.
