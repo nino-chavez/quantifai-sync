@@ -5,6 +5,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"time"
 )
 
 const (
@@ -76,7 +77,8 @@ const trayPlistTemplate = `<?xml version="1.0" encoding="UTF-8"?>
 
 // LaunchAgent implements the Installer interface for macOS.  It generates
 // plists at ~/Library/LaunchAgents/ for both the daemon and the tray icon,
-// and manages them via launchctl load/unload.
+// and manages them via launchctl (bootstrap/bootout to install, unload to
+// uninstall).
 type LaunchAgent struct {
 	plistPath     string
 	trayPlistPath string
@@ -130,18 +132,52 @@ func (la *LaunchAgent) Install() error {
 		return fmt.Errorf("service: write plist %s: %w", la.plistPath, err)
 	}
 
-	cmd := exec.Command("launchctl", "load", la.plistPath)
-	if out, err := cmd.CombinedOutput(); err != nil {
-		return fmt.Errorf("service: launchctl load daemon: %s: %w", string(out), err)
+	if err := reloadAgent(plistLabel, la.plistPath); err != nil {
+		return fmt.Errorf("service: load daemon: %w", err)
 	}
 
 	// Install tray plist (best-effort — tray is optional)
 	trayContent := la.GenerateTrayPlist()
 	if err := os.WriteFile(la.trayPlistPath, []byte(trayContent), 0644); err == nil {
-		exec.Command("launchctl", "load", la.trayPlistPath).CombinedOutput()
+		reloadAgent(trayPlistLabel, la.trayPlistPath)
 	}
 
 	return nil
+}
+
+// bootoutTimeout bounds the wait for launchd to remove a booted-out agent.
+const bootoutTimeout = 10 * time.Second
+
+// reloadAgent starts the agent in plist, replacing any loaded instance so a
+// reinstall runs the new binary and the new plist. "launchctl load" on a
+// loaded label fails or leaves the old process running, and "kickstart -k"
+// restarts the process without rereading a changed plist. So it boots out
+// a loaded agent, waits until launchd no longer lists it (bootstrap right
+// after bootout can otherwise fail with an I/O error), then bootstraps.
+func reloadAgent(label, plist string) error {
+	domain := fmt.Sprintf("gui/%d", os.Getuid())
+	target := domain + "/" + label
+	if agentLoaded(target) {
+		if out, err := exec.Command("launchctl", "bootout", target).CombinedOutput(); err != nil && agentLoaded(target) {
+			return fmt.Errorf("launchctl bootout %s: %s: %w", target, out, err)
+		}
+		deadline := time.Now().Add(bootoutTimeout)
+		for agentLoaded(target) {
+			if time.Now().After(deadline) {
+				return fmt.Errorf("launchctl bootout %s: still loaded after %s", target, bootoutTimeout)
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}
+	if out, err := exec.Command("launchctl", "bootstrap", domain, plist).CombinedOutput(); err != nil {
+		return fmt.Errorf("launchctl bootstrap %s %s: %s: %w", domain, plist, out, err)
+	}
+	return nil
+}
+
+// agentLoaded reports whether launchd lists target (domain/label).
+func agentLoaded(target string) bool {
+	return exec.Command("launchctl", "print", target).Run() == nil
 }
 
 // Uninstall unloads both the daemon and tray agents and removes their plist files.
