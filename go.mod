@@ -6,6 +6,7 @@ require (
 	github.com/fsnotify/fsnotify v1.8.0
 	github.com/getlantern/systray v1.2.2
 	github.com/zalando/go-keyring v0.2.6
+	golang.org/x/sys v0.26.0
 )
 
 require (
@@ -20,5 +21,4 @@ require (
 	github.com/go-stack/stack v1.8.0 // indirect
 	github.com/godbus/dbus/v5 v5.1.0 // indirect
 	github.com/oxtoacart/bpool v0.0.0-20190530202638-03653db5a59c // indirect
-	golang.org/x/sys v0.26.0 // indirect
 )
