@@ -15,7 +15,6 @@ import (
 	"time"
 
 	"github.com/quantifai/sync/internal/config"
-	"github.com/quantifai/sync/internal/credentials"
 	"github.com/quantifai/sync/internal/editor"
 	gitpkg "github.com/quantifai/sync/internal/git"
 	"github.com/quantifai/sync/internal/health"
@@ -109,39 +108,14 @@ func Execute() int {
 
 // runAgent starts the full agent pipeline with graceful shutdown support.
 func runAgent() int {
-	// Load configuration
-	cfg, err := config.Load("", "")
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to load config: %v\n", err)
-		return 1
-	}
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	if err := config.Validate(cfg); err != nil {
-		fmt.Fprintf(os.Stderr, "invalid config: %v\n", err)
-		return 1
-	}
-
-	if !cfg.SyncEnabled {
-		fmt.Fprintf(os.Stderr, "sync_enabled is false; exiting\n")
+	st, ok := waitFor(loadStartup, configRetryInterval, sigCh, os.Stderr)
+	if !ok {
 		return 0
 	}
-
-	// `install --api-key` stores the key in the OS keyring, so the agent
-	// has to look there too; reading only the config left an installed
-	// agent with no key and a 401 on every cycle.
-	apiKey, keySource, err := credentials.NewManagerWithOSKeyring(cfg.APIKey).ResolveAPIKey()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "no API key: run `quantifai-sync install --api-key <key>`, or set api_key in %s or QUANTIFAI_API_KEY\n", config.DefaultUserConfigPath())
-		return 1
-	}
-	cfg.APIKey = apiKey
-
-	// Initialize logger
-	log, err := logger.New(logger.ParseLevel(cfg.LogLevel), cfg.LogFile)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "failed to initialize logger: %v\n", err)
-		return 1
-	}
+	cfg, keySource, log := st.cfg, st.keySource, st.log
 	defer log.Close()
 
 	log.Info("starting quantifai-sync", map[string]any{
@@ -185,9 +159,6 @@ func runAgent() int {
 
 	// Start the updater background loop (no-op when auto_update=false)
 	go u.Run(ctx)
-
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
 	liteMode := parser.IsLiteKey(cfg.APIKey)
 	scanInterval := time.Duration(cfg.FlushInterval) * time.Second
