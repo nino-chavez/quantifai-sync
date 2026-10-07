@@ -1,36 +1,39 @@
-# Homebrew formula for quantifai-sync — the Quantifai telemetry sync agent.
-# Maintained in-tree; published to a Homebrew tap on release.
-#
-# To install from tap: brew install quantifai-app/tap/quantifai-sync
-# To install from local formula: brew install --formula packaging/homebrew/quantifai-sync.rb
+# Generated from packaging/homebrew/quantifai-sync.rb in nino-chavez/quantifai-sync
+# by `make formula`. Edit the template there; the tap copy is replaced on release.
 class QuantifaiSync < Formula
-  desc "Telemetry sync agent for Quantifai — streams Claude Code usage to your dashboard"
+  desc "Telemetry sync agent for Quantifai — streams AI tool usage to your dashboard"
   homepage "https://quantifai.app"
   version "VERSION"
   license "MIT"
 
   on_macos do
     if Hardware::CPU.arm?
-      url "https://github.com/quantifai-app/sync/releases/download/vVERSION/quantifai-sync-darwin-arm64.tar.gz"
+      url "https://github.com/nino-chavez/quantifai-sync/releases/download/vVERSION/quantifai-sync-darwin-arm64.tar.gz"
       sha256 "SHA256_DARWIN_ARM64"
     else
-      url "https://github.com/quantifai-app/sync/releases/download/vVERSION/quantifai-sync-darwin-amd64.tar.gz"
+      url "https://github.com/nino-chavez/quantifai-sync/releases/download/vVERSION/quantifai-sync-darwin-amd64.tar.gz"
       sha256 "SHA256_DARWIN_AMD64"
     end
   end
 
   on_linux do
     if Hardware::CPU.arm?
-      url "https://github.com/quantifai-app/sync/releases/download/vVERSION/quantifai-sync-linux-arm64.tar.gz"
+      url "https://github.com/nino-chavez/quantifai-sync/releases/download/vVERSION/quantifai-sync-linux-arm64.tar.gz"
       sha256 "SHA256_LINUX_ARM64"
     else
-      url "https://github.com/quantifai-app/sync/releases/download/vVERSION/quantifai-sync-linux-amd64.tar.gz"
+      url "https://github.com/nino-chavez/quantifai-sync/releases/download/vVERSION/quantifai-sync-linux-amd64.tar.gz"
       sha256 "SHA256_LINUX_AMD64"
     end
   end
 
   def install
-    bin.install "quantifai-sync"
+    # Each release archive holds one binary named for its platform,
+    # e.g. quantifai-sync-darwin-arm64.
+    Dir.glob("quantifai-sync-*").each do |f|
+      next if f.end_with?(".sha256")
+
+      bin.install f => "quantifai-sync"
+    end
   end
 
   service do
@@ -40,9 +43,11 @@ class QuantifaiSync < Formula
     error_log_path var/"log/quantifai-sync.log"
   end
 
-  def post_install
-    ohai "Run 'quantifai-sync install' to register the background service"
-    ohai "Or use 'brew services start quantifai-sync' to manage via Homebrew"
+  def caveats
+    <<~EOS
+      Store your API key and register the background service:
+        quantifai-sync install --api-key YOUR_KEY
+    EOS
   end
 
   test do

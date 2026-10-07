@@ -45,9 +45,9 @@ cross-build:
 	CGO_ENABLED=0 GOOS=linux   GOARCH=arm64 go build $(LDFLAGS) -o bin/$(BINARY)-linux-arm64 .
 	CGO_ENABLED=0 GOOS=windows GOARCH=amd64 go build $(LDFLAGS) -o bin/$(BINARY)-windows-amd64.exe .
 
-## formula: Update Homebrew formula with release SHA256 hashes
+## formula: Render the Homebrew formula for VERSION into bin/quantifai-sync.rb
 formula:
-	packaging/homebrew/update-formula.sh $(VERSION)
+	packaging/homebrew/update-formula.sh $(VERSION) bin/quantifai-sync.rb
 
 ## pkg: Build macOS .pkg installer (macOS only)
 pkg:
