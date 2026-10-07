@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"encoding/xml"
 	"fmt"
+	"os"
+	"path/filepath"
 )
 
 // windowsTaskName is the Task Scheduler task that runs the agent.
@@ -62,6 +64,17 @@ const taskTemplate = `<?xml version="1.0" encoding="UTF-16"?>
   </Actions>
 </Task>
 `
+
+// WindowsLogPath is where the supervised agent's output goes on Windows,
+// the counterpart of launchd's ~/Library/Logs/quantifai-sync.log: the
+// logon task has no console, so stderr would otherwise be lost.
+func WindowsLogPath() string {
+	dir, err := os.UserCacheDir() // %LocalAppData% on Windows
+	if err != nil {
+		dir = os.TempDir()
+	}
+	return filepath.Join(dir, "quantifai", "quantifai-sync.log")
+}
 
 // taskArguments starts the agent with its console window hidden, under a
 // supervisor that restarts it after a crash.

@@ -74,6 +74,7 @@ func (w *Windows) Install() error {
 		return err
 	}
 	fmt.Printf("registered logon task %s for %s\n", w.taskName, w.user)
+	fmt.Printf("agent output goes to %s\n", WindowsLogPath())
 	// StopExisting makes this replace an instance that is still running.
 	if out, err := exec.Command("schtasks", "/run", "/tn", w.taskName).CombinedOutput(); err != nil {
 		return fmt.Errorf("service: schtasks /run: %s: %w", out, err)

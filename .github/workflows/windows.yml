@@ -53,6 +53,14 @@ jobs:
           if (@($before).Count -ne 2) { Write-Error 'want a supervisor and an agent running while the key is missing'; exit 1 }
           if (($before -join ',') -ne ($after -join ',')) { Write-Error 'agent was restarted while waiting for a key'; exit 1 }
           'agent waited for its key without being restarted'
+          # The waiting message must be visible: the task has no console, so
+          # it goes to the log file install prints.
+          $log = Join-Path $env:LOCALAPPDATA 'quantifai\quantifai-sync.log'
+          if (-not (Test-Path $log)) { Write-Error "no log file at $log"; exit 1 }
+          Get-Content $log
+          $n = @(Select-String -Path $log -Pattern 'no API key' -SimpleMatch).Count
+          if ($n -ne 1) { Write-Error "want the missing-key message once in the log, found $n"; exit 1 }
+          'missing-key message is in the log, once'
           exit 0
       # End to end on the runner (never in `go test`, which a developer runs on
       # their own machine): install registers the QuantifaiSync logon task and

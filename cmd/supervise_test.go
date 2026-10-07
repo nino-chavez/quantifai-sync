@@ -40,6 +40,16 @@ func TestSuperviseHelper(t *testing.T) {
 		}
 		os.WriteFile(os.Getenv(handoffEnv), []byte("v9.9.9"), 0600)
 		os.Exit(exitUpdated)
+	case "echo":
+		os.Stderr.WriteString("hello from the agent\n")
+		os.Exit(0)
+	case "supervise-echo":
+		if err := redirectOutputToLog(); err != nil {
+			os.Exit(2)
+		}
+		os.Setenv("QUANTIFAI_SUPERVISE_HELPER", "echo")
+		l, _ := logger.New(logger.LevelInfo, "")
+		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, l))
 	case "sleep":
 		os.WriteFile(arg, []byte(strconv.Itoa(os.Getpid())), 0600)
 		time.Sleep(60 * time.Second)

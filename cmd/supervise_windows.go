@@ -3,12 +3,32 @@
 package cmd
 
 import (
+	"os"
 	"os/exec"
+	"path/filepath"
 	"syscall"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
+
+	"github.com/quantifai/sync/internal/service"
 )
+
+// redirectOutputToLog points stdout and stderr at service.WindowsLogPath,
+// appending. Children started afterwards inherit it, so the agent's own
+// messages (such as a config problem it is waiting on) land there too.
+func redirectOutputToLog() error {
+	path := service.WindowsLogPath()
+	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return err
+	}
+	os.Stdout, os.Stderr = f, f
+	return nil
+}
 
 // killChildrenWithSupervisor puts this process in a job object that kills
 // every process in it when the last handle closes. Children inherit the

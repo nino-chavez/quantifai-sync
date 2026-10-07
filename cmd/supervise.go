@@ -32,7 +32,13 @@ const handoffEnv = "QUANTIFAI_SUPERVISOR_HANDOFF"
 // this way because Task Scheduler does not restart a task whose program
 // exits with an error. launchd and systemd restart the agent themselves.
 func superviseAgent() int {
+	// The logon task has no console: send this process's output, and the
+	// agent's, which inherits it, to a log file first.
+	logErr := redirectOutputToLog()
 	log := supervisorLogger()
+	if logErr != nil {
+		log.Warn("supervisor could not open its log file", map[string]any{"error": logErr.Error()})
+	}
 	// Resolved once: after a self-update renames the running file aside,
 	// this path holds the new binary.
 	exe, err := os.Executable()
