@@ -18,7 +18,9 @@ const windowsTaskName = "QuantifaiSync"
 //
 // Settings Task Scheduler gets wrong for a long-running agent are set
 // explicitly: no execution time limit (the default stops a task after 72
-// hours), and start and keep running on battery.
+// hours), and start and keep running on battery. A failed run is restarted
+// after a minute, up to three times, as the earlier service's recovery
+// settings did.
 //
 // Placeholders, in order: user (trigger), user (principal), command,
 // arguments. All are XML-escaped by GenerateTaskXML.
@@ -47,6 +49,10 @@ const taskTemplate = `<?xml version="1.0" encoding="UTF-16"?>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <AllowHardTerminate>true</AllowHardTerminate>
     <StartWhenAvailable>true</StartWhenAvailable>
+    <RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>
     <Enabled>true</Enabled>
   </Settings>
   <Actions Context="Author">

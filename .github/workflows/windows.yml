@@ -21,9 +21,9 @@ jobs:
       - name: Build
         run: go build ./...
       - name: Test file lock, commit queue, path naming, updater and logon task
-        run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
-      - name: Logon task (verbose, shows whether the task could run here)
-        run: go test -count=1 -v -run TestTask ./internal/service/
+        run: go test -count=1 -short ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
+      - name: Logon task (verbose; includes the one-minute restart check)
+        run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
       # End to end on the runner (never in `go test`, which a developer runs on
       # their own machine): install registers the QuantifaiSync logon task and
       # stores the key in Credential Manager; the agent must start as this user,

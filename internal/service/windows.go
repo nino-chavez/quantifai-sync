@@ -8,7 +8,11 @@ import (
 	"os/exec"
 	"os/user"
 	"path/filepath"
+	"strings"
 	"unicode/utf16"
+	"unsafe"
+
+	"golang.org/x/sys/windows"
 )
 
 const (
@@ -57,11 +61,21 @@ func (w *Windows) Install() error {
 	if w.user == "" {
 		return fmt.Errorf("service: could not determine the current user")
 	}
+	// Elevating with another administrator's credentials runs install as
+	// that administrator, inside the signed-in user's session. The task
+	// would then watch the administrator's profile instead.
+	if signedIn := sessionUser(); signedIn != "" && !strings.EqualFold(signedIn, w.user) {
+		return fmt.Errorf("service: install is running as %s, but %s is signed in to this session; "+
+			"the agent runs as the account that installs it, so run install elevated as %s", w.user, signedIn, signedIn)
+	}
 	removeService(oldWindowsServiceName)
 	if err := w.register(); err != nil {
 		return err
 	}
 	fmt.Printf("registered logon task %s for %s\n", w.taskName, w.user)
+	// A running instance would make /run a no-op (IgnoreNew); stop it so the
+	// new definition takes effect now.
+	exec.Command("schtasks", "/end", "/tn", w.taskName).CombinedOutput()
 	if out, err := exec.Command("schtasks", "/run", "/tn", w.taskName).CombinedOutput(); err != nil {
 		return fmt.Errorf("service: schtasks /run: %s: %w", out, err)
 	}
@@ -119,6 +133,36 @@ func (w *Windows) MigrateFromOld() error {
 	}
 
 	return nil
+}
+
+// sessionUser returns DOMAIN\user signed in to this process's session, or
+// "" if it cannot be read.
+func sessionUser() string {
+	query := windows.NewLazySystemDLL("wtsapi32.dll").NewProc("WTSQuerySessionInformationW")
+	if query.Find() != nil {
+		return ""
+	}
+	const (
+		currentServer  = 0          // WTS_CURRENT_SERVER_HANDLE
+		currentSession = 0xFFFFFFFF // WTS_CURRENT_SESSION
+		wtsUserName    = 5
+		wtsDomainName  = 7
+	)
+	get := func(class uintptr) string {
+		var buf *uint16
+		var n uint32
+		r, _, _ := query.Call(currentServer, currentSession, class, uintptr(unsafe.Pointer(&buf)), uintptr(unsafe.Pointer(&n)))
+		if r == 0 || buf == nil {
+			return ""
+		}
+		defer windows.WTSFreeMemory(uintptr(unsafe.Pointer(buf)))
+		return windows.UTF16PtrToString(buf)
+	}
+	name := get(wtsUserName)
+	if name == "" {
+		return ""
+	}
+	return get(wtsDomainName) + `\` + name
 }
 
 // removeService stops and deletes a Windows Service if it exists.

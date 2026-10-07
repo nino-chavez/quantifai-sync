@@ -21,6 +21,10 @@ func TestTaskXMLSettings(t *testing.T) {
 		`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
 		`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
 		`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
+		`<RestartOnFailure>
+      <Interval>PT1M</Interval>
+      <Count>3</Count>
+    </RestartOnFailure>`,
 	} {
 		if !strings.Contains(x, want) {
 			t.Errorf("task XML missing:\n%s\n--- got:\n%s", want, x)
