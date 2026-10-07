@@ -115,33 +115,6 @@ func TestTaskRunsAsInstallingUser(t *testing.T) {
 	t.Skipf("task did not run within 20s; scheduler state:\n%s", info)
 }
 
-// Task Scheduler restarts a run that exits with an error, per
-// RestartOnFailure. The interval cannot be under a minute, so this waits.
-func TestTaskRestartsAfterErrorExit(t *testing.T) {
-	if testing.Short() {
-		t.Skip("waits over a minute for Task Scheduler's restart")
-	}
-	marker := filepath.Join(t.TempDir(), "runs.txt")
-	w := testTask(t, `C:\Windows\System32\cmd.exe`, fmt.Sprintf(`/c echo run>> "%s" & exit 1`, marker))
-
-	if out, err := exec.Command("schtasks", "/run", "/tn", w.taskName).CombinedOutput(); err != nil {
-		t.Fatalf("schtasks /run: %s: %v", out, err)
-	}
-	runs := func() int {
-		b, _ := os.ReadFile(marker)
-		return strings.Count(string(b), "run")
-	}
-	for i := 0; i < 100; i++ {
-		if runs() >= 2 {
-			t.Logf("restarted after an error exit: %d runs", runs())
-			return
-		}
-		time.Sleep(time.Second)
-	}
-	info, _ := exec.Command("schtasks", "/query", "/tn", w.taskName, "/v", "/fo", "list").CombinedOutput()
-	t.Fatalf("%d run(s) after 100s, want a restart; scheduler state:\n%s", runs(), info)
-}
-
 func TestSessionUserMatchesProcessUser(t *testing.T) {
 	u, err := user.Current()
 	if err != nil {
