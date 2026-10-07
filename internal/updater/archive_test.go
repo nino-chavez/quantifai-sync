@@ -113,6 +113,13 @@ func fakeRelease(t *testing.T) (*GithubUpdater, string, *atomic.Int32) {
 // "per-file" (<asset>.sha256), "consolidated" (checksums.txt) or "none".
 func fakeReleaseWith(t *testing.T, checksums string) (*GithubUpdater, string, *atomic.Int32) {
 	t.Helper()
+	return fakeReleaseServing(t, checksums, func(w http.ResponseWriter, _ *http.Request, data []byte) { w.Write(data) })
+}
+
+// fakeReleaseServing is fakeReleaseWith with control over how the archive
+// is sent.
+func fakeReleaseServing(t *testing.T, checksums string, serveArchive func(http.ResponseWriter, *http.Request, []byte)) (*GithubUpdater, string, *atomic.Int32) {
+	t.Helper()
 	layout, ok := releaseLayout[runtime.GOOS+"/"+runtime.GOARCH]
 	if !ok {
 		t.Skipf("no release asset for %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -137,7 +144,7 @@ func fakeReleaseWith(t *testing.T, checksums string) (*GithubUpdater, string, *a
 		switch name := strings.TrimPrefix(r.URL.Path, "/o/r/releases/download/v9.9.9/"); name {
 		case asset:
 			downloads.Add(1)
-			w.Write(data)
+			serveArchive(w, r, data)
 		case asset + ".sha256":
 			if checksums != "per-file" {
 				http.NotFound(w, r)
