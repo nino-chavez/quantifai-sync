@@ -21,7 +21,7 @@ func RunInstall(apiKey string) int {
 		if err := mgr.StoreAPIKey(apiKey); err != nil {
 			fmt.Printf("warning: could not store API key in keyring: %v\n", err)
 		} else {
-			fmt.Println("API key stored in OS keyring")
+			fmt.Println("API key stored in OS keyring (the agent reads it before any api_key in config.toml)")
 		}
 	}
 
