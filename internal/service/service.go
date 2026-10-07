@@ -1,6 +1,6 @@
 // Package service provides platform-specific service installation and
-// uninstallation for macOS LaunchAgent, Linux systemd user units, and
-// Windows Services.  Each platform implementation conforms to the
+// uninstallation for macOS LaunchAgent, Linux systemd user units, and a
+// Windows Task Scheduler logon task.  Each platform implementation conforms to the
 // Installer interface and optionally the Migrator interface for upgrading
 // from the old ai-ops-shipper service.
 package service

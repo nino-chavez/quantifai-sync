@@ -20,5 +20,7 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: go build ./...
-      - name: Test file lock, commit queue, path naming and updater
-        run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/
+      - name: Test file lock, commit queue, path naming, updater and logon task
+        run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
+      - name: Logon task (verbose, shows whether the task could run here)
+        run: go test -count=1 -v -run TestTask ./internal/service/

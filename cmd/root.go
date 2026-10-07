@@ -53,7 +53,13 @@ func Execute() int {
 		return RunHealthcheck(cfg.HealthPort)
 
 	case "run":
-		// Explicit "run" subcommand (used by service managers)
+		// Explicit "run" subcommand (used by service managers). The Windows
+		// logon task passes --no-console to hide the window it opens.
+		for _, arg := range os.Args[2:] {
+			if arg == "--no-console" {
+				hideConsole()
+			}
+		}
 		return runAgent()
 
 	case "tray":
