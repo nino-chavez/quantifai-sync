@@ -18,6 +18,9 @@ func TestTaskXMLSettings(t *testing.T) {
 		`<Command>C:\Users\ana\bin\quantifai-sync.exe</Command>`,
 		`<Arguments>run --no-console</Arguments>`,
 		`<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
+		`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
+		`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
+		`<ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
 	} {
 		if !strings.Contains(x, want) {
 			t.Errorf("task XML missing:\n%s\n--- got:\n%s", want, x)

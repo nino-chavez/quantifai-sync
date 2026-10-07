@@ -17,7 +17,8 @@ const windowsTaskName = "QuantifaiSync"
 // names the same user; a bare logon trigger fires for anyone who logs on.
 //
 // Settings Task Scheduler gets wrong for a long-running agent are set
-// explicitly; see TestTaskXMLSettings.
+// explicitly: no execution time limit (the default stops a task after 72
+// hours), and start and keep running on battery.
 //
 // Placeholders, in order: user (trigger), user (principal), command,
 // arguments. All are XML-escaped by GenerateTaskXML.
@@ -41,7 +42,11 @@ const taskTemplate = `<?xml version="1.0" encoding="UTF-16"?>
   </Principals>
   <Settings>
     <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
+    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
+    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
     <AllowHardTerminate>true</AllowHardTerminate>
+    <StartWhenAvailable>true</StartWhenAvailable>
     <Enabled>true</Enabled>
   </Settings>
   <Actions Context="Author">

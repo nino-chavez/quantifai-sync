@@ -64,7 +64,6 @@ func TestTaskRegistersWithLongRunningSettings(t *testing.T) {
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
 		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
 		"<LogonType>InteractiveToken</LogonType>",
-		"<RunLevel>LeastPrivilege</RunLevel>",
 		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
 		"<LogonTrigger>",
 		"<Command>" + bin + "</Command>",
@@ -74,8 +73,20 @@ func TestTaskRegistersWithLongRunningSettings(t *testing.T) {
 			t.Errorf("stored task is missing %s", want)
 		}
 	}
+	// Windows omits RunLevel when it is the default, LeastPrivilege.
+	if strings.Contains(stored, "<RunLevel>HighestAvailable</RunLevel>") {
+		t.Error("stored task runs elevated, want LeastPrivilege")
+	}
 	if t.Failed() {
 		t.Logf("stored task:\n%s", stored)
+	}
+
+	// The same limit in Windows' own words.
+	info, _ := exec.Command("schtasks", "/query", "/tn", w.taskName, "/v", "/fo", "list").CombinedOutput()
+	for _, line := range strings.Split(string(info), "\n") {
+		if strings.Contains(line, "Stop Task If Runs") || strings.Contains(line, "Power Management") || strings.Contains(line, "Logon Mode") {
+			t.Logf("%s", strings.TrimSpace(line))
+		}
 	}
 }
 
