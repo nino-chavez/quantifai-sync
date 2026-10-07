@@ -38,6 +38,7 @@ type HealthState struct {
 	recordsBuffered int
 	errorsLastHour  int
 	staleAfter      time.Duration
+	problem         string
 }
 
 // DefaultStaleAfter is how long after the last fully acknowledged sync
@@ -108,6 +109,16 @@ type healthResponse struct {
 	FilesTracked    int    `json:"files_tracked"`
 	RecordsBuffered int    `json:"records_buffered"`
 	ErrorsLastHour  int    `json:"errors_last_hour"`
+	Problem         string `json:"problem,omitempty"`
+}
+
+// SetProblem reports why the agent cannot sync yet (for example a missing
+// API key). While set, the status is "error" and the problem is included
+// in the response; "" clears it.
+func (h *HealthState) SetProblem(problem string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.problem = problem
 }
 
 // Snapshot returns a point-in-time copy of the health state formatted
@@ -128,6 +139,9 @@ func (h *HealthState) Snapshot() healthResponse {
 	if status == StatusOK && (h.lastSyncTime.IsZero() || time.Since(h.lastSyncTime) > h.staleAfter) {
 		status = StatusDegraded
 	}
+	if h.problem != "" {
+		status = StatusError
+	}
 
 	return healthResponse{
 		Status:          string(status),
@@ -137,6 +151,7 @@ func (h *HealthState) Snapshot() healthResponse {
 		FilesTracked:    h.filesTracked,
 		RecordsBuffered: h.recordsBuffered,
 		ErrorsLastHour:  h.errorsLastHour,
+		Problem:         h.problem,
 	}
 }
 
