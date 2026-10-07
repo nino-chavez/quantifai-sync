@@ -109,9 +109,11 @@ func extractPort(t *testing.T, url string) int {
 	return port
 }
 
-// healthcheck shows the problem a waiting agent reports and exits 1.
+// healthcheck shows the problem a waiting agent reports, sent with 503
+// as the agent does, and exits 1.
 func TestHealthcheckPrintsProblem(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusServiceUnavailable)
 		json.NewEncoder(w).Encode(map[string]any{
 			"status":  "error",
 			"version": "v1",

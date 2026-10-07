@@ -194,7 +194,10 @@ func (s *Server) RegisterHandler(pattern string, handler http.HandlerFunc) {
 	s.httpServer.Handler.(*http.ServeMux).HandleFunc(pattern, handler)
 }
 
-// handleHealthz writes the current health state as JSON.
+// handleHealthz writes the current health state as JSON. An "error"
+// status is sent with 503, so a check that reads only the HTTP code sees
+// it; "ok" and "degraded" (running, not synced recently) are sent with
+// 200. The body is the same either way.
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		w.WriteHeader(http.StatusMethodNotAllowed)
@@ -203,8 +206,12 @@ func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 
 	snap := s.state.Snapshot()
 
+	code := http.StatusOK
+	if snap.Status == string(StatusError) {
+		code = http.StatusServiceUnavailable
+	}
 	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(http.StatusOK)
+	w.WriteHeader(code)
 	json.NewEncoder(w).Encode(snap)
 }
 

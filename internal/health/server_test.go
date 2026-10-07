@@ -114,8 +114,11 @@ func TestHealthzStatusTransitions(t *testing.T) {
 
 	addr := srv.Addr()
 
-	// Helper to fetch and parse the status field
+	// Helper to fetch and parse the status field. It also checks the HTTP
+	// code: 503 for "error", so a plain HTTP check sees the failure, and
+	// 200 otherwise.
 	getStatus := func() string {
+		t.Helper()
 		resp, err := http.Get(fmt.Sprintf("http://%s/healthz", addr))
 		if err != nil {
 			t.Fatalf("GET /healthz failed: %v", err)
@@ -124,7 +127,15 @@ func TestHealthzStatusTransitions(t *testing.T) {
 
 		var body map[string]any
 		json.NewDecoder(resp.Body).Decode(&body)
-		return body["status"].(string)
+		status := body["status"].(string)
+		want := http.StatusOK
+		if status == "error" {
+			want = http.StatusServiceUnavailable
+		}
+		if resp.StatusCode != want {
+			t.Errorf("status %q answered HTTP %d, want %d", status, resp.StatusCode, want)
+		}
+		return status
 	}
 
 	// Never synced: degraded, even though nothing has failed
@@ -162,6 +173,16 @@ func TestHealthzStatusTransitions(t *testing.T) {
 	state.SetStatus(StatusOK)
 	if got := getStatus(); got != "ok" {
 		t.Errorf("recovered status: got %q, want %q", got, "ok")
+	}
+
+	// An agent waiting on a config problem reports "error"
+	state.SetProblem("no API key")
+	if got := getStatus(); got != "error" {
+		t.Errorf("waiting status: got %q, want %q", got, "error")
+	}
+	state.SetProblem("")
+	if got := getStatus(); got != "ok" {
+		t.Errorf("problem cleared status: got %q, want %q", got, "ok")
 	}
 }
 

@@ -45,10 +45,13 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit 1 }
           Start-Sleep 5
           $before = (Get-Process quantifai-sync -ErrorAction SilentlyContinue).Id | Sort-Object
-          # While it waits, /health must report the problem, not refuse the connection.
-          $waiting = Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 5
+          # While it waits, /health must report the problem, not refuse the
+          # connection, and answer 503 so a check of the HTTP code alone fails.
+          $waiting = Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 5 -SkipHttpErrorCheck -StatusCodeVariable waitingCode
+          "HTTP $waitingCode"
           $waiting | ConvertTo-Json -Compress
           if ($waiting.status -ne 'error' -or $waiting.problem -notlike 'no API key*') { Write-Error 'health did not report the missing key'; exit 1 }
+          if ($waitingCode -ne 503) { Write-Error "health answered HTTP $waitingCode while waiting, want 503"; exit 1 }
           Start-Sleep 25
           $after = (Get-Process quantifai-sync -ErrorAction SilentlyContinue).Id | Sort-Object
           "processes at 5s:  $($before -join ', ')"
