@@ -25,7 +25,7 @@ jobs:
       - name: Logon task (verbose, shows whether the task could run here)
         run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
       - name: Supervisor (crash restart, no orphaned agent)
-        run: go test -count=1 -v -run "TestSupervise" ./cmd/
+        run: go test -count=1 -v -run "TestSupervis" ./cmd/
       # End to end on the runner (never in `go test`, which a developer runs on
       # their own machine): install registers the QuantifaiSync logon task and
       # stores the key in Credential Manager; the agent must start as this user,

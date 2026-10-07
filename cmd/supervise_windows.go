@@ -5,6 +5,7 @@ package cmd
 import (
 	"os/exec"
 	"syscall"
+	"unsafe"
 
 	"golang.org/x/sys/windows"
 )
@@ -15,7 +16,22 @@ import (
 // logoff) the agent goes with it instead of running on as an orphan. The
 // handle is deliberately never closed; it closes when this process exits.
 func killChildrenWithSupervisor() error {
-	return nil // TEMPORARY: no job object, to measure orphans on CI
+	job, err := windows.CreateJobObject(nil, nil)
+	if err != nil {
+		return err
+	}
+	var info windows.JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+	info.BasicLimitInformation.LimitFlags = windows.JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
+	if _, err := windows.SetInformationJobObject(job, windows.JobObjectExtendedLimitInformation,
+		uintptr(unsafe.Pointer(&info)), uint32(unsafe.Sizeof(info))); err != nil {
+		windows.CloseHandle(job)
+		return err
+	}
+	if err := windows.AssignProcessToJobObject(job, windows.CurrentProcess()); err != nil {
+		windows.CloseHandle(job)
+		return err
+	}
+	return nil
 }
 
 // hideChildWindow starts the child without a console window.
