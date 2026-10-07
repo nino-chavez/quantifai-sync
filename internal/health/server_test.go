@@ -73,9 +73,10 @@ func TestHealthzReturnsCorrectJSONSchema(t *testing.T) {
 		}
 	}
 
-	// Verify specific values
-	if body["status"] != "ok" {
-		t.Errorf("status: got %q, want %q", body["status"], "ok")
+	// Verify specific values. The fixed sync date is months old, so the
+	// status must report the pipeline as stale.
+	if body["status"] != "degraded" {
+		t.Errorf("status: got %q, want %q", body["status"], "degraded")
 	}
 	if body["version"] != "1.2.3" {
 		t.Errorf("version: got %q, want %q", body["version"], "1.2.3")
@@ -125,10 +126,24 @@ func TestHealthzStatusTransitions(t *testing.T) {
 		return body["status"].(string)
 	}
 
-	// Initial state should be "ok"
-	if got := getStatus(); got != "ok" {
-		t.Errorf("initial status: got %q, want %q", got, "ok")
+	// Never synced: degraded, even though nothing has failed
+	if got := getStatus(); got != "degraded" {
+		t.Errorf("never-synced status: got %q, want %q", got, "degraded")
 	}
+
+	// A recent acknowledged sync earns "ok"
+	state.SetLastSyncTime(time.Now())
+	if got := getStatus(); got != "ok" {
+		t.Errorf("synced status: got %q, want %q", got, "ok")
+	}
+
+	// A sync older than the stale threshold degrades again
+	state.SetStaleAfter(time.Minute)
+	state.SetLastSyncTime(time.Now().Add(-2 * time.Minute))
+	if got := getStatus(); got != "degraded" {
+		t.Errorf("stale status: got %q, want %q", got, "degraded")
+	}
+	state.SetLastSyncTime(time.Now())
 
 	// Simulate send failures: transition to "degraded"
 	state.SetStatus(StatusDegraded)

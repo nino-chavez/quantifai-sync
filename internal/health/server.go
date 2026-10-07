@@ -37,16 +37,30 @@ type HealthState struct {
 	filesTracked    int
 	recordsBuffered int
 	errorsLastHour  int
+	staleAfter      time.Duration
 }
+
+// DefaultStaleAfter is how long after the last fully acknowledged sync
+// cycle the status turns degraded when no other threshold is set.
+const DefaultStaleAfter = 15 * time.Minute
 
 // NewHealthState creates a HealthState initialized to "ok" with the
 // given version string and the current time as the start time.
 func NewHealthState(version string) *HealthState {
 	return &HealthState{
-		status:    StatusOK,
-		version:   version,
-		startTime: time.Now(),
+		status:     StatusOK,
+		version:    version,
+		startTime:  time.Now(),
+		staleAfter: DefaultStaleAfter,
 	}
+}
+
+// SetStaleAfter sets how old the last successful sync may be before the
+// reported status degrades.
+func (h *HealthState) SetStaleAfter(d time.Duration) {
+	h.mu.Lock()
+	h.staleAfter = d
+	h.mu.Unlock()
 }
 
 // SetStatus updates the pipeline status.
@@ -56,7 +70,8 @@ func (h *HealthState) SetStatus(s Status) {
 	h.mu.Unlock()
 }
 
-// SetLastSyncTime records the most recent successful sync timestamp.
+// SetLastSyncTime records when a sync cycle last finished with every batch
+// acknowledged by the server (including cycles with nothing to send).
 func (h *HealthState) SetLastSyncTime(t time.Time) {
 	h.mu.Lock()
 	h.lastSyncTime = t
@@ -106,8 +121,16 @@ func (h *HealthState) Snapshot() healthResponse {
 		lastSync = h.lastSyncTime.UTC().Format(time.RFC3339)
 	}
 
+	// "ok" has to be earned by a recent acknowledged sync. A pipeline that
+	// has never synced, or stopped syncing, is degraded however healthy its
+	// goroutines look; that is what made the silent-loss failure invisible.
+	status := h.status
+	if status == StatusOK && (h.lastSyncTime.IsZero() || time.Since(h.lastSyncTime) > h.staleAfter) {
+		status = StatusDegraded
+	}
+
 	return healthResponse{
-		Status:          string(h.status),
+		Status:          string(status),
 		Version:         h.version,
 		UptimeSeconds:   int64(time.Since(h.startTime).Seconds()),
 		LastSyncTime:    lastSync,

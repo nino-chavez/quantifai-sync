@@ -70,10 +70,16 @@ func DefaultSystemConfigPath() string {
 	return newPath
 }
 
+// DefaultAPIURL is the canonical server host. www.quantifai.app answers with
+// a cross-host 308 to this apex, and Go drops the Authorization header on a
+// cross-host redirect, so the www form fails as an unauthenticated request.
+const DefaultAPIURL = "https://quantifai.app"
+
 // defaults returns a Config populated with all default values from the spec.
 func defaults() Config {
 	home, _ := os.UserHomeDir()
 	return Config{
+		APIURL:        DefaultAPIURL,
 		SyncEnabled:   true,
 		WatchDir:      filepath.Join(home, ".claude", "projects"),
 		StateFile:     defaultStateFile(home),

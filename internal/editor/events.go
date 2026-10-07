@@ -3,8 +3,6 @@
 package editor
 
 import (
-	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,7 +11,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 
 	"github.com/quantifai/sync/internal/logger"
 )
@@ -121,69 +118,11 @@ func ReadAndClearQueue() ([]EditorEvent, error) {
 	return events, nil
 }
 
-// FlushEditorQueue reads queued editor events and POSTs them to the API.
-func FlushEditorQueue(apiURL, apiKey string, log *logger.Logger) int {
-	events, err := ReadAndClearQueue()
-	if err != nil {
-		log.Warn("failed to read editor queue", map[string]any{"error": err.Error()})
-		return 0
-	}
-	if len(events) == 0 {
-		return 0
-	}
-
-	url := strings.TrimRight(apiURL, "/") + "/api/v1/ingest/editor-events"
-	payload := EditorEventBatch{Events: events}
-
-	body, err := json.Marshal(payload)
-	if err != nil {
-		log.Error("failed to marshal editor events", map[string]any{"error": err.Error()})
-		return 0
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		log.Error("failed to create editor ingest request", map[string]any{"error": err.Error()})
-		return 0
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+apiKey)
-
-	client := &http.Client{Timeout: 5 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		log.Warn("failed to send editor events", map[string]any{
-			"error":  err.Error(),
-			"events": len(events),
-		})
-		requeueEvents(events, log)
-		return 0
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		log.Info("editor events sent", map[string]any{"count": len(events)})
-		return len(events)
-	}
-
-	log.Warn("editor ingest returned non-2xx", map[string]any{
-		"status": resp.StatusCode,
-		"events": len(events),
-	})
-	if resp.StatusCode == 429 || resp.StatusCode >= 500 {
-		requeueEvents(events, log)
-	}
-	return 0
-}
-
-func requeueEvents(events []EditorEvent, log *logger.Logger) {
-	if err := QueueEvents(events); err != nil {
-		log.Warn("failed to re-queue editor events", map[string]any{"error": err.Error()})
-	}
-}
+// There is no flush. The QuantifAI server has no editor-events endpoint or
+// table (its ingest contract is units, sessions, messages and git events),
+// and the old flush POSTed to /api/v1/ingest/editor-events, got a 404, and
+// dropped the events it had already truncated from the queue. Events now
+// stay in the local queue until the server has somewhere to put them.
 
 // HandleEditorEvents returns an HTTP handler that accepts POST /api/v1/editor-events
 // from the VS Code extension and queues them locally.

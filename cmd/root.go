@@ -1,18 +1,16 @@
 // Package cmd provides CLI subcommands for the quantifai-sync binary.
-// The root command starts the agent pipeline: watcher -> reader ->
-// parser -> buffer -> sender.  Subcommands (install, uninstall, version,
+// The root command starts the agent pipeline: collector -> ingest
+// batches -> sender, committing file offsets only after acknowledgment.  Subcommands (install, uninstall, version,
 // healthcheck) are dispatched based on os.Args.
 package cmd
 
 import (
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
 	"os"
 	"os/signal"
-	"path/filepath"
-	"strings"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -20,18 +18,13 @@ import (
 	"github.com/quantifai/sync/internal/editor"
 	gitpkg "github.com/quantifai/sync/internal/git"
 	"github.com/quantifai/sync/internal/health"
+	"github.com/quantifai/sync/internal/ingest"
 	"github.com/quantifai/sync/internal/logger"
 	"github.com/quantifai/sync/internal/parser"
-	"github.com/quantifai/sync/internal/reader"
 	"github.com/quantifai/sync/internal/sender"
 	"github.com/quantifai/sync/internal/state"
-	"github.com/quantifai/sync/internal/scanner"
 	"github.com/quantifai/sync/internal/updater"
 )
-
-// shutdownTimeout is the maximum time allowed for a graceful shutdown
-// (flush buffered records, persist state, close watcher).
-const shutdownTimeout = 30 * time.Second
 
 // Execute is the main CLI entrypoint.  It parses os.Args to dispatch
 // to the appropriate subcommand or runs the agent pipeline by default.
@@ -134,16 +127,13 @@ func runAgent() int {
 	// Start health server
 	healthState := health.NewHealthState(Version)
 	healthSrv := health.NewServer(cfg.HealthPort, healthState)
-	// Register editor events endpoint for VS Code extension
+	// Register editor events endpoint for VS Code extension (queues locally)
 	healthSrv.RegisterHandler("/api/v1/editor-events", editor.HandleEditorEvents(log))
 	go healthSrv.ListenAndServe()
 	defer healthSrv.Shutdown(context.Background())
 
 	// Start background auto-updater
 	u := updater.NewUpdater(cfg.AutoUpdate, Version, cfg.UpdateChannel, cfg.UpdateRepo, cfg.UpdateCheckInterval, log)
-
-	// Collect identity once at startup
-	identity := parser.CollectIdentity()
 
 	// Initialize state manager
 	stateMgr, err := state.NewManager(cfg.StateFile)
@@ -173,79 +163,31 @@ func runAgent() int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	// Initialize buffer with sender flush function.
-	// State is persisted only after successful HTTP acknowledgment
-	// to guarantee at-least-once delivery.
-	flushInterval := time.Duration(cfg.FlushInterval) * time.Second
-	buf := sender.NewBuffer(cfg.BatchSize, flushInterval, func(fctx context.Context, records []parser.MessageRecord) bool {
-		ok := snd.Send(fctx, records)
-		if ok {
-			healthState.SetLastSyncTime(time.Now())
-			if err := stateMgr.Save(); err != nil {
-				log.Warn("failed to save state after send", map[string]any{"error": err.Error()})
-			}
-		}
-
-		// Flush queued commit events alongside session data
-		if cfg.GitEnabled && cfg.APIURL != "" && cfg.APIKey != "" {
-			if n := gitpkg.FlushCommitQueue(cfg.APIURL, cfg.APIKey, log); n > 0 {
-				log.Debug("flushed commit events", map[string]any{"count": n})
-			}
-		}
-
-		// Flush queued editor events from VS Code extension
-		if cfg.APIURL != "" && cfg.APIKey != "" {
-			if n := editor.FlushEditorQueue(cfg.APIURL, cfg.APIKey, log); n > 0 {
-				log.Debug("flushed editor events", map[string]any{"count": n})
-			}
-		}
-
-		return ok
-	})
-
 	liteMode := parser.IsLiteKey(cfg.APIKey)
 	scanInterval := time.Duration(cfg.FlushInterval) * time.Second
+	collector := ingest.NewCollector(cfg.WatchDir, liteMode)
+
+	// Degrade once three scan intervals pass without an acknowledged cycle,
+	// but never sooner than the default.
+	if stale := 3 * scanInterval; stale > health.DefaultStaleAfter {
+		healthState.SetStaleAfter(stale)
+	}
 
 	log.Info("pipeline started", map[string]any{
-		"watch_dir":      cfg.WatchDir,
-		"batch_size":     cfg.BatchSize,
-		"scan_interval":  cfg.FlushInterval,
-		"health_port":    cfg.HealthPort,
+		"watch_dir":     cfg.WatchDir,
+		"api_url":       cfg.APIURL,
+		"batch_size":    cfg.BatchSize,
+		"scan_interval": cfg.FlushInterval,
+		"health_port":   cfg.HealthPort,
+		"lite_mode":     liteMode,
 	})
+	log.Info("editor events stay in the local queue: the server has no editor-events endpoint", nil)
 
 	healthState.SetStatus(health.StatusOK)
 
-	// Poll-based main loop: scan → read → parse → buffer → flush
-	// Every cycle walks the directory, finds files with new data,
-	// reads new bytes, parses records, and flushes the batch.
-	// First cycle processes all historical files (backfill).
-	scanAndProcess := func() {
-		files := scanner.Scan(cfg.WatchDir, stateMgr)
-		if len(files) == 0 {
-			return
-		}
-
-		for _, f := range files {
-			processFile(ctx, f.Path, f.ByteOffset, stateMgr, identity, buf, log, cfg.IntentTagEnabled, liteMode)
-		}
-
-		// Flush after processing all files in this cycle
-		buf.Flush(ctx)
-		healthState.SetRecordsBuffered(buf.Len())
-
-		total, pending := scanner.Count(cfg.WatchDir, stateMgr)
-		healthState.SetFilesTracked(total)
-		if pending > 0 {
-			log.Debug("scan cycle complete", map[string]any{
-				"files_scanned": len(files),
-				"total_files":   total,
-				"pending":       pending,
-			})
-		}
-	}
-
-	// Run first scan immediately (handles backfill)
-	scanAndProcess()
+	// Run first cycle immediately (it also reads every file once to rebuild
+	// session totals in memory), then one cycle per scan interval.
+	runCycle(ctx, cfg, collector, snd, stateMgr, healthState, liteMode, log)
 
 	ticker := time.NewTicker(scanInterval)
 	defer ticker.Stop()
@@ -253,149 +195,124 @@ func runAgent() int {
 	for {
 		select {
 		case <-ticker.C:
-			scanAndProcess()
+			runCycle(ctx, cfg, collector, snd, stateMgr, healthState, liteMode, log)
 
 		case sig := <-sigCh:
-			log.Info("received signal, initiating graceful shutdown", map[string]any{
+			log.Info("received signal, shutting down", map[string]any{
 				"signal": sig.String(),
 			})
 			cancel()
-			goto shutdown
+			return gracefulShutdown(stateMgr, log)
 		}
 	}
-
-shutdown:
-	return gracefulShutdown(buf, stateMgr, log)
 }
 
-// processFile reads new lines from a JSONL file starting at the given
-// byte offset, parses them into MessageRecord structs, and adds them to
-// the send buffer.
-func processFile(
+// largeCycleMessages is the cycle size after which memory is returned to
+// the OS (the first cycle reads every session file once).
+const largeCycleMessages = 10_000
+
+// runCycle collects every session that gained messages since the committed
+// offsets, sends them, and commits the new offsets only when every batch
+// was acknowledged with counts that match what was sent. A failed cycle
+// commits nothing; the next cycle re-reads from the same offsets, which is
+// safe because the server dedups messages and replaces session totals.
+func runCycle(
 	ctx context.Context,
-	filePath string,
-	byteOffset int64,
+	cfg config.Config,
+	collector *ingest.Collector,
+	snd *sender.Sender,
 	stateMgr *state.Manager,
-	identity *parser.Identity,
-	buf *sender.Buffer,
-	log *logger.Logger,
-	intentTagEnabled bool,
+	healthState *health.HealthState,
 	liteMode bool,
-) {
-	result, err := reader.ReadFromOffset(filePath, byteOffset)
-	if err != nil {
-		log.Warn("failed to read file", map[string]any{
-			"path":  filePath,
-			"error": err.Error(),
-		})
-		return
+	log *logger.Logger,
+) bool {
+	ok, messages := syncOnce(ctx, cfg, collector, snd, stateMgr, healthState, liteMode, log)
+	if messages >= largeCycleMessages {
+		// A backfill decodes gigabytes of JSON. syncOnce has returned, so
+		// that data is unreachable now; hand it back rather than holding it
+		// for the life of a background agent, on failure as well.
+		debug.FreeOSMemory()
 	}
-
-	if len(result.Lines) == 0 {
-		return
-	}
-
-	// Derive the project path from the file's parent directory name
-	projectPath := projectPathFromFile(filePath)
-
-	parsed := 0
-	var sessionIntentTag *string // first user prompt's intent tag for this batch
-	for _, line := range result.Lines {
-		rec := parser.ParseRecord(json.RawMessage(line), projectPath)
-		if rec == nil {
-			continue
-		}
-
-		// Enrich with identity fields
-		rec.GitName = identity.GitName
-		rec.GitEmail = identity.GitEmail
-		rec.OsUsername = identity.OsUsername
-		rec.MachineID = identity.MachineID
-
-		// Extract intent tag from first user prompt (opt-in)
-		if intentTagEnabled && rec.RecordType == "user" && rec.ContentText != nil && sessionIntentTag == nil {
-			sessionIntentTag = parser.ExtractIntentTag(*rec.ContentText)
-		}
-
-		// Stamp intent tag on all records in the batch
-		if sessionIntentTag != nil {
-			rec.IntentTag = sessionIntentTag
-		}
-
-		// Lite mode: strip PII before transmission (key prefix "ql_")
-		if liteMode {
-			parser.ScrubForLite(rec)
-		}
-
-		buf.Add(ctx, *rec)
-		parsed++
-	}
-
-	// Update in-memory state with new byte offset.
-	// Disk persistence is deferred to the buffer's flush callback
-	// (after successful HTTP acknowledgment) to ensure at-least-once delivery.
-	stateMgr.Set(filePath, state.FileState{
-		ByteOffset: result.NewOffset,
-	})
-
-	if parsed > 0 {
-		log.Debug("processed file event", map[string]any{
-			"path":        filePath,
-			"lines":       len(result.Lines),
-			"records":     parsed,
-			"new_offset":  result.NewOffset,
-		})
-	}
+	return ok
 }
 
-// projectPathFromFile extracts the project directory name (the
-// dash-encoded path) from a JSONL file's absolute path.  Claude Code
-// stores sessions at:
-//   ~/.claude/projects/<encoded-path>/<session>.jsonl
-//   ~/.claude/projects/<encoded-path>/<session>/subagents/<agent>.jsonl
-//
-// For subagent files, we walk up past the subagents/ and session UUID
-// directories to reach the encoded project path.
-func projectPathFromFile(filePath string) string {
-	// Split into path components
-	parts := strings.Split(filepath.ToSlash(filePath), "/")
+// syncOnce does one cycle and reports whether it was fully acknowledged and
+// how many messages it handled.
+func syncOnce(
+	ctx context.Context,
+	cfg config.Config,
+	collector *ingest.Collector,
+	snd *sender.Sender,
+	stateMgr *state.Manager,
+	healthState *health.HealthState,
+	liteMode bool,
+	log *logger.Logger,
+) (bool, int) {
+	started := time.Now()
+	cyc := collector.Collect(func(path string) int64 { return stateMgr.Get(path).ByteOffset })
+	messages := cyc.Messages()
+	healthState.SetFilesTracked(cyc.Files)
+	healthState.SetRecordsBuffered(messages)
+	for path, err := range cyc.ReadErrors {
+		log.Warn("failed to read session file", map[string]any{"path": path, "error": err.Error()})
+	}
 
-	// Find "projects" in the path — the next component is the encoded project name
-	for i, part := range parts {
-		if part == "projects" && i+1 < len(parts) {
-			return parts[i+1]
+	// Commit events are independent of session files, so a stuck session
+	// batch must not hold them back.
+	if cfg.GitEnabled && cfg.APIKey != "" {
+		if n := gitpkg.FlushCommitQueue(ctx, "", snd.Send, liteMode, log); n > 0 {
+			log.Info("commit events stored", map[string]any{"count": n})
 		}
 	}
 
-	// Fallback: parent directory name
-	dir := filepath.Dir(filePath)
-	return filepath.Base(dir)
-}
+	// A batch the server keeps rejecting stalls the cycle here on purpose:
+	// nothing is committed, /health turns degraded, and the error is logged
+	// every cycle. Stalling loudly is the alternative to losing data quietly.
+	batches := ingest.BuildBatches(cyc.Groups, cfg.BatchSize)
+	for i, b := range batches {
+		if _, err := snd.Send(ctx, b); err != nil {
+			log.Error("sync cycle failed; offsets not advanced", map[string]any{
+				"batch":    i + 1,
+				"batches":  len(batches),
+				"sessions": len(b.Sessions),
+				"messages": len(b.Messages),
+				"error":    err.Error(),
+			})
+			return false, messages
+		}
+	}
 
-// gracefulShutdown flushes remaining records and persists state.
-// Returns exit code 0 on success, 1 on timeout.
-func gracefulShutdown(buf *sender.Buffer, stateMgr *state.Manager, log *logger.Logger) int {
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-
-		// Flush any remaining buffered records
-		log.Info("flushing buffered records", map[string]any{"buffered": buf.Len()})
-		buf.Flush(context.Background())
-
-		// Persist state
+	for path, off := range cyc.Offsets {
+		stateMgr.Set(path, state.FileState{ByteOffset: off})
+	}
+	if len(cyc.Offsets) > 0 {
 		if err := stateMgr.Save(); err != nil {
-			log.Error("failed to save state during shutdown", map[string]any{"error": err.Error()})
+			log.Error("batches stored but offsets not saved; they will be re-sent", map[string]any{"error": err.Error()})
+			return false, messages
 		}
+	}
 
-		log.Info("shutdown complete", nil)
-	}()
+	healthState.SetLastSyncTime(time.Now())
+	healthState.SetRecordsBuffered(0)
+	if len(batches) > 0 {
+		log.Info("sync cycle complete", map[string]any{
+			"batches":     len(batches),
+			"sessions":    len(cyc.Groups),
+			"messages":    messages,
+			"duration_ms": time.Since(started).Milliseconds(),
+		})
+	}
+	return true, messages
+}
 
-	select {
-	case <-done:
-		return 0
-	case <-time.After(shutdownTimeout):
-		log.Error("shutdown timed out", map[string]any{"timeout_seconds": shutdownTimeout.Seconds()})
+// gracefulShutdown persists committed offsets. Offsets only ever reach the
+// state manager after the server acknowledged their batches, so nothing
+// read but unsent can be marked done here.
+func gracefulShutdown(stateMgr *state.Manager, log *logger.Logger) int {
+	if err := stateMgr.Save(); err != nil {
+		log.Error("failed to save state during shutdown", map[string]any{"error": err.Error()})
 		return 1
 	}
+	log.Info("shutdown complete", nil)
+	return 0
 }
