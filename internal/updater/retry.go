@@ -44,6 +44,12 @@ func retryable(err error) bool {
 	return errors.As(err, &ne) || errors.Is(err, io.ErrUnexpectedEOF)
 }
 
+// notFound reports whether err is a 404 from GitHub.
+func notFound(err error) bool {
+	var se *statusError
+	return errors.As(err, &se) && se.code == http.StatusNotFound
+}
+
 // nextRetry doubles the previous wait, starting at base, never past limit.
 func nextRetry(prev, base, limit time.Duration) time.Duration {
 	next := base

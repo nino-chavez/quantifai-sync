@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -67,7 +68,7 @@ func TestIsNewer(t *testing.T) {
 		{"2.0.0", "1.9.9", true},
 		{"1.0.0", "1.0.0", false},
 		{"0.9.0", "1.0.0", false},
-		{"1.0.0", "dev", true},      // any real version > dev (0.0.0)
+		{"1.0.0", "dev", true}, // any real version > dev (0.0.0)
 		{"0.0.1", "0.0.0", true},
 		{"10.0.0", "9.9.9", true},
 	}
@@ -141,51 +142,55 @@ func TestAtomicReplace(t *testing.T) {
 // Mock HTTP version check tests
 // ---------------------------------------------------------------------------
 
-func TestFetchLatestRelease(t *testing.T) {
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{
-			"tag_name": "v1.2.0",
-			"assets": [
-				{"name": "quantifai-sync-darwin-arm64", "browser_download_url": "https://example.com/darwin-arm64"},
-				{"name": "quantifai-sync-darwin-arm64.sha256", "browser_download_url": "https://example.com/darwin-arm64.sha256"},
-				{"name": "quantifai-sync-linux-amd64", "browser_download_url": "https://example.com/linux-amd64"}
-			]
-		}`)
-	}))
-	defer server.Close()
-
-	g := &GithubUpdater{
-		log:     newDiscardLogger(),
-		version: "1.0.0",
-		repo:    "test/repo",
-		client:  server.Client(),
+// latestTag reads the tag from github.com's releases/latest redirect,
+// without following it, and classifies the failures.
+func TestLatestTag(t *testing.T) {
+	tests := []struct {
+		name     string
+		status   int
+		location string
+		want     string
+		wantErr  string
+		retry    bool
+	}{
+		{"redirect to tag", http.StatusFound, "https://github.com/o/r/releases/tag/v1.2.0", "v1.2.0", "", false},
+		{"no release yet", http.StatusFound, "https://github.com/o/r/releases", "", "no published release", false},
+		{"repo missing", http.StatusNotFound, "", "", "HTTP 404", false},
+		{"server error", http.StatusServiceUnavailable, "", "", "HTTP 503", true},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodHead || r.URL.Path != "/o/r/releases/latest" {
+					t.Errorf("request %s %s, want HEAD /o/r/releases/latest", r.Method, r.URL.Path)
+				}
+				if tt.location != "" {
+					w.Header().Set("Location", tt.location)
+				}
+				w.WriteHeader(tt.status)
+			}))
+			defer server.Close()
+			g := &GithubUpdater{
+				log:     newDiscardLogger(),
+				version: "1.0.0",
+				repo:    "o/r",
+				client:  &http.Client{Timeout: 5 * time.Second, Transport: &rewriteTransport{base: http.DefaultTransport, target: server.URL}},
+			}
 
-	// Override the URL by injecting a custom fetch
-	// We need to test the parsing, so use the server directly
-	origURL := fmt.Sprintf("https://api.github.com/repos/%s/releases/latest", g.repo)
-	_ = origURL // unused, we'll test via a round-trip test below
-
-	// Test by using a custom transport
-	g.client = &http.Client{
-		Timeout: 5 * time.Second,
-		Transport: &rewriteTransport{
-			base:   http.DefaultTransport,
-			target: server.URL,
-		},
-	}
-
-	release, err := g.fetchLatestRelease(context.Background())
-	if err != nil {
-		t.Fatalf("fetchLatestRelease: %v", err)
-	}
-
-	if release.TagName != "v1.2.0" {
-		t.Errorf("tag_name: got %q, want %q", release.TagName, "v1.2.0")
-	}
-	if len(release.Assets) != 3 {
-		t.Errorf("assets count: got %d, want 3", len(release.Assets))
+			got, err := g.latestTag(context.Background())
+			if tt.wantErr == "" {
+				if err != nil || got != tt.want {
+					t.Fatalf("latestTag = %q, %v; want %q", got, err, tt.want)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("latestTag error = %v, want one containing %q", err, tt.wantErr)
+			}
+			if retryable(err) != tt.retry {
+				t.Fatalf("retryable(%v) = %v, want %v", err, retryable(err), tt.retry)
+			}
+		})
 	}
 }
 
