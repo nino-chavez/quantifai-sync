@@ -10,8 +10,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"syscall"
 
+	"github.com/quantifai/sync/internal/filelock"
 	"github.com/quantifai/sync/internal/logger"
 )
 
@@ -47,16 +47,16 @@ func QueueEvents(events []EditorEvent) error {
 		return fmt.Errorf("create queue dir: %w", err)
 	}
 
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	f, err := os.OpenFile(path, os.O_CREATE|filelock.AppendFlags, 0600)
 	if err != nil {
 		return fmt.Errorf("open queue file: %w", err)
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := filelock.Lock(f); err != nil {
 		return fmt.Errorf("lock queue file: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer filelock.Unlock(f)
 
 	for _, ev := range events {
 		data, err := json.Marshal(ev)
@@ -85,10 +85,10 @@ func ReadAndClearQueue() ([]EditorEvent, error) {
 	}
 	defer f.Close()
 
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := filelock.Lock(f); err != nil {
 		return nil, fmt.Errorf("lock queue file: %w", err)
 	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer filelock.Unlock(f)
 
 	data, err := io.ReadAll(f)
 	if err != nil {

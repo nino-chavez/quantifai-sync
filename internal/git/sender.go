@@ -8,8 +8,8 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"syscall"
 
+	"github.com/quantifai/sync/internal/filelock"
 	"github.com/quantifai/sync/internal/ingest"
 	"github.com/quantifai/sync/internal/logger"
 )
@@ -20,7 +20,7 @@ func defaultQueuePath() string {
 	return filepath.Join(home, ".config", "quantifai", "commit-events.jsonl")
 }
 
-// lockQueue takes an exclusive flock on a sidecar file next to the queue
+// lockQueue takes an exclusive lock on a sidecar file next to the queue
 // and returns the unlock function. Locking the sidecar rather than the
 // queue file itself is what lets AckQueue replace the queue with an atomic
 // rename: an appender that opens the queue only after holding this lock
@@ -33,12 +33,12 @@ func lockQueue(path string) (func(), error) {
 	if err != nil {
 		return nil, fmt.Errorf("open queue lock: %w", err)
 	}
-	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+	if err := filelock.Lock(lf); err != nil {
 		lf.Close()
 		return nil, fmt.Errorf("lock queue: %w", err)
 	}
 	return func() {
-		syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		filelock.Unlock(lf)
 		lf.Close()
 	}, nil
 }
