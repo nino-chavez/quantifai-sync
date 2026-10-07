@@ -58,7 +58,9 @@ func TestReplaceExecutableWhileRunning(t *testing.T) {
 	}
 
 	newBin := filepath.Join(t.TempDir(), "new")
-	os.WriteFile(newBin, []byte("new binary"), 0755)
+	if err := os.WriteFile(newBin, []byte("new binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
 	if err := replaceExecutable(newBin, exe); err != nil {
 		t.Fatalf("replace a running executable: %v", err)
 	}
@@ -67,7 +69,9 @@ func TestReplaceExecutableWhileRunning(t *testing.T) {
 	}
 
 	newer := filepath.Join(t.TempDir(), "newer")
-	os.WriteFile(newer, []byte("newer binary"), 0755)
+	if err := os.WriteFile(newer, []byte("newer binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	if runtime.GOOS == "windows" {
 		// While the old process still runs, its .old file cannot be replaced:
