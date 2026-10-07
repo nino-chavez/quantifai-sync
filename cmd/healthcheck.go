@@ -50,7 +50,8 @@ func runHealthcheck(client *http.Client, port int, out io.Writer) int {
 		return 1
 	}
 
-	if resp.StatusCode != http.StatusOK {
+	// The agent answers 503 for status "error", with the same report.
+	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusServiceUnavailable {
 		fmt.Fprintf(out, "healthcheck failed: HTTP %d\n", resp.StatusCode)
 		return 1
 	}
