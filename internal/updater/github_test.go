@@ -83,21 +83,26 @@ func TestIsNewer(t *testing.T) {
 // Asset name matching tests
 // ---------------------------------------------------------------------------
 
+// The names below are copied from the v0.3.0 release, not derived from
+// expectedAssetName: the old test checked the function against its own
+// convention and passed while every real release used another one.
 func TestExpectedAssetName(t *testing.T) {
 	tests := []struct {
 		goos, goarch string
-		want         string
+		asset, bin   string
 	}{
-		{"darwin", "arm64", "quantifai-sync-darwin-arm64"},
-		{"darwin", "amd64", "quantifai-sync-darwin-amd64"},
-		{"linux", "amd64", "quantifai-sync-linux-amd64"},
-		{"linux", "arm64", "quantifai-sync-linux-arm64"},
-		{"windows", "amd64", "quantifai-sync-windows-amd64.exe"},
+		{"darwin", "arm64", "quantifai-sync-darwin-arm64.tar.gz", "quantifai-sync-darwin-arm64"},
+		{"darwin", "amd64", "quantifai-sync-darwin-amd64.tar.gz", "quantifai-sync-darwin-amd64"},
+		{"linux", "amd64", "quantifai-sync-linux-amd64.tar.gz", "quantifai-sync-linux-amd64"},
+		{"linux", "arm64", "quantifai-sync-linux-arm64.tar.gz", "quantifai-sync-linux-arm64"},
+		{"windows", "amd64", "quantifai-sync-windows-amd64.zip", "quantifai-sync-windows-amd64.exe"},
 	}
 	for _, tt := range tests {
-		got := expectedAssetName(tt.goos, tt.goarch)
-		if got != tt.want {
-			t.Errorf("expectedAssetName(%q, %q) = %q, want %q", tt.goos, tt.goarch, got, tt.want)
+		if got := expectedAssetName(tt.goos, tt.goarch); got != tt.asset {
+			t.Errorf("expectedAssetName(%q, %q) = %q, want %q", tt.goos, tt.goarch, got, tt.asset)
+		}
+		if got := binaryName(tt.goos, tt.goarch); got != tt.bin {
+			t.Errorf("binaryName(%q, %q) = %q, want %q", tt.goos, tt.goarch, got, tt.bin)
 		}
 	}
 }

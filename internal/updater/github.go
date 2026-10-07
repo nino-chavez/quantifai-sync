@@ -1,6 +1,9 @@
 package updater
 
 import (
+	"archive/tar"
+	"archive/zip"
+	"compress/gzip"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -26,6 +29,9 @@ type GithubUpdater struct {
 	repo          string // "owner/repo"
 	interval      time.Duration
 	client        *http.Client
+
+	// executable locates the binary to replace; nil means os.Executable.
+	executable func() (string, error)
 }
 
 // githubRelease is the subset of the GitHub Releases API response we need.
@@ -54,8 +60,8 @@ func NewGithubUpdater(version, updateChannel, repo string, interval time.Duratio
 }
 
 // CheckAndApply checks GitHub for a newer release. If found, it downloads
-// the binary, verifies the SHA256 checksum, and atomically replaces the
-// current executable.
+// the release archive, verifies its SHA256 checksum, extracts the binary,
+// and atomically replaces the current executable.
 func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	g.log.Info("checking for updates", map[string]any{
 		"current_version": g.version,
@@ -105,14 +111,16 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("no asset found for %s/%s in release %s", runtime.GOOS, runtime.GOARCH, release.TagName)
 	}
 
-	// Download binary to temp file
-	tmpDir := os.TempDir()
-	tmpFile := filepath.Join(tmpDir, "quantifai-sync-update")
+	// Download the archive to a temp file
+	tmpFile, err := tempPath("quantifai-sync-update-*")
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(tmpFile)
 
 	if err := g.downloadFile(ctx, assetURL, tmpFile); err != nil {
-		return false, fmt.Errorf("download binary: %w", err)
+		return false, fmt.Errorf("download archive: %w", err)
 	}
-	defer os.Remove(tmpFile) // clean up on failure
 
 	// Verify checksum — reject update if no checksum source is available
 	if checksumURL != "" {
@@ -145,13 +153,27 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	}
 	g.log.Info("checksum verified", map[string]any{"asset": assetName})
 
-	// Make the downloaded file executable
-	if err := os.Chmod(tmpFile, 0755); err != nil {
+	// The checksum covers the archive; the binary inside is what gets installed.
+	binFile, err := tempPath("quantifai-sync-bin-*")
+	if err != nil {
+		return false, err
+	}
+	defer os.Remove(binFile) // no-op after a successful replace
+	if err := extractBinary(tmpFile, assetName, binaryName(runtime.GOOS, runtime.GOARCH), binFile); err != nil {
+		return false, fmt.Errorf("extract %s: %w", assetName, err)
+	}
+
+	// Make the extracted binary executable
+	if err := os.Chmod(binFile, 0755); err != nil {
 		return false, fmt.Errorf("chmod: %w", err)
 	}
 
-	// Atomic replace: rename temp file over current binary
-	currentBinary, err := os.Executable()
+	// Atomic replace: rename the extracted binary over the current one
+	executable := g.executable
+	if executable == nil {
+		executable = os.Executable
+	}
+	currentBinary, err := executable()
 	if err != nil {
 		return false, fmt.Errorf("resolve current executable: %w", err)
 	}
@@ -160,9 +182,12 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
-	if err := atomicReplace(tmpFile, currentBinary); err != nil {
+	if err := atomicReplace(binFile, currentBinary); err != nil {
 		return false, fmt.Errorf("replace binary: %w", err)
 	}
+	// The running process is still the old binary until it restarts; record
+	// the installed version so later checks do not re-apply the same release.
+	g.version = release.TagName
 
 	g.log.Info("update applied successfully", map[string]any{
 		"from": currentVersion,
@@ -402,15 +427,103 @@ func atomicReplace(src, dst string) error {
 	return os.Rename(tmpDst, dst)
 }
 
-// expectedAssetName returns the expected release asset filename for the
-// current OS and architecture. Matches the naming convention used by
-// cross-build in the Makefile.
+// expectedAssetName returns the release archive for an OS and architecture:
+// quantifai-sync-<os>-<arch>.tar.gz, or .zip on Windows. Every release
+// since v0.1.0 publishes this layout, with a .sha256 file per archive.
 func expectedAssetName(goos, goarch string) string {
+	if goos == "windows" {
+		return fmt.Sprintf("quantifai-sync-%s-%s.zip", goos, goarch)
+	}
+	return fmt.Sprintf("quantifai-sync-%s-%s.tar.gz", goos, goarch)
+}
+
+// binaryName is the executable inside a release archive, named as
+// cross-build in the Makefile names it.
+func binaryName(goos, goarch string) string {
 	name := fmt.Sprintf("quantifai-sync-%s-%s", goos, goarch)
 	if goos == "windows" {
 		name += ".exe"
 	}
 	return name
+}
+
+// tempPath creates an empty temp file and returns its path.
+func tempPath(pattern string) (string, error) {
+	f, err := os.CreateTemp("", pattern)
+	if err != nil {
+		return "", fmt.Errorf("create temp file: %w", err)
+	}
+	f.Close()
+	return f.Name(), nil
+}
+
+// extractBinary writes the regular file called name from the archive at
+// archivePath to dest. The format comes from the asset name.
+func extractBinary(archivePath, assetName, name, dest string) error {
+	switch {
+	case strings.HasSuffix(assetName, ".tar.gz"):
+		return extractFromTarGz(archivePath, name, dest)
+	case strings.HasSuffix(assetName, ".zip"):
+		return extractFromZip(archivePath, name, dest)
+	}
+	return fmt.Errorf("unsupported archive type: %s", assetName)
+}
+
+func extractFromTarGz(archivePath, name, dest string) error {
+	f, err := os.Open(archivePath)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	gz, err := gzip.NewReader(f)
+	if err != nil {
+		return err
+	}
+	defer gz.Close()
+	tr := tar.NewReader(gz)
+	for {
+		hdr, err := tr.Next()
+		if err == io.EOF {
+			return fmt.Errorf("%s not found in archive", name)
+		}
+		if err != nil {
+			return err
+		}
+		if hdr.Name == name && hdr.Typeflag == tar.TypeReg {
+			return writeFile(dest, tr)
+		}
+	}
+}
+
+func extractFromZip(archivePath, name, dest string) error {
+	zr, err := zip.OpenReader(archivePath)
+	if err != nil {
+		return err
+	}
+	defer zr.Close()
+	for _, zf := range zr.File {
+		if zf.Name == name && zf.Mode().IsRegular() {
+			rc, err := zf.Open()
+			if err != nil {
+				return err
+			}
+			defer rc.Close()
+			return writeFile(dest, rc)
+		}
+	}
+	return fmt.Errorf("%s not found in archive", name)
+}
+
+func writeFile(dest string, r io.Reader) error {
+	f, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE|os.O_TRUNC, 0755)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(f, r); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // normalizeVersion strips a leading "v" prefix from a version string.
