@@ -1,0 +1,24 @@
+# Windows has no other check: releases cross-compile it from macOS, and
+# nothing else runs the Windows file-lock path (internal/filelock).
+name: windows
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Build
+        run: go build ./...
+      - name: Test file lock and commit queue
+        run: go test -count=1 ./internal/filelock/ ./internal/git/
