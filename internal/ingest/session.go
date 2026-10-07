@@ -191,9 +191,15 @@ func repoKey(path string) string {
 // otherwise the encoded directory name, minus its leading dash, is the key.
 // The name applies repoRoot a second time, as the TS repoKey does, so a
 // Codex worktree subdirectory holding a .worktrees/ path still names the repo.
+//
+// Windows paths (C:\..., \\server\share\...) diverge from the TS rule, which
+// only accepts a leading "/": they are converted to forward slashes so the
+// markers and the last-segment name work. ToSlash and IsAbs reduce to the
+// TS rule on unix. The TS importer never reads Windows paths, so this
+// divergence cannot file one repo under two keys.
 func NormalizeProjectPath(projectDirName, sampleCwd string) (projectPath, repoName string, normalized bool) {
-	if strings.HasPrefix(sampleCwd, "/") {
-		collapsed := repoRoot(sampleCwd)
+	if p := filepath.ToSlash(sampleCwd); strings.HasPrefix(p, "/") || filepath.IsAbs(sampleCwd) {
+		collapsed := repoRoot(p)
 		return collapsed, repoKey(collapsed), true
 	}
 	raw := strings.TrimPrefix(projectDirName, "-")
