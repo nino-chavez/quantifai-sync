@@ -66,12 +66,32 @@ func TestReplaceExecutableWhileRunning(t *testing.T) {
 		t.Fatalf("executable holds %d bytes, want the new binary", len(got))
 	}
 
-	// Once the old process has exited, the next update replaces again and
-	// clears what the first one left behind.
-	stop()
 	newer := filepath.Join(t.TempDir(), "newer")
 	os.WriteFile(newer, []byte("newer binary"), 0755)
-	if err := replaceExecutable(newer, exe); err != nil {
+
+	if runtime.GOOS == "windows" {
+		// While the old process still runs, its .old file cannot be replaced:
+		// a second update must fail and leave the installed binary alone.
+		if err := replaceExecutable(newer, exe); err == nil {
+			t.Fatal("second replace while the old process runs: want an error")
+		}
+		if got, _ := os.ReadFile(exe); string(got) != "new binary" {
+			t.Fatalf("failed replace changed the executable to %q", got)
+		}
+		if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
+			t.Error("failed replace left the staged .new file")
+		}
+	}
+
+	// Once the old process has exited, the next update replaces again and
+	// clears what the first one left behind. On Windows, pass the path the
+	// old process may report after the swap, which ends in .old.
+	stop()
+	target := exe
+	if runtime.GOOS == "windows" {
+		target = exe + ".old"
+	}
+	if err := replaceExecutable(newer, target); err != nil {
 		t.Fatalf("second replace: %v", err)
 	}
 	if got, _ := os.ReadFile(exe); string(got) != "newer binary" {
