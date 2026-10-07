@@ -30,6 +30,7 @@ type healthResponse struct {
 	FilesTracked    int    `json:"files_tracked"`
 	RecordsBuffered int    `json:"records_buffered"`
 	ErrorsLastHour  int    `json:"errors_last_hour"`
+	Problem         string `json:"problem,omitempty"`
 }
 
 // Run starts the systray menu bar icon. It blocks until the user quits.
@@ -104,7 +105,7 @@ func onReady(healthPort int, dashboardURL string) {
 
 				// Notify on degraded/error status transitions
 				if h.Status == "error" {
-					mStatus.SetTitle("Quantifai Sync — Error")
+					mStatus.SetTitle(statusTitle(h))
 				}
 			} else {
 				mStatus.SetTitle("Quantifai Sync — Not Running")
@@ -159,15 +160,7 @@ func onReady(healthPort int, dashboardURL string) {
 }
 
 func updateMenuRunning(h *healthResponse, mStatus, mLastSync, mFiles, mBuffered, mErrors *systray.MenuItem) {
-	// Status line
-	statusLabel := "Running"
-	switch h.Status {
-	case "degraded":
-		statusLabel = "Degraded"
-	case "error":
-		statusLabel = "Error"
-	}
-	mStatus.SetTitle(fmt.Sprintf("Quantifai Sync — %s", statusLabel))
+	mStatus.SetTitle(statusTitle(h))
 
 	// Last sync
 	if h.LastSyncTime != "" {

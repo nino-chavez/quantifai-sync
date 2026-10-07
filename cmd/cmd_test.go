@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -106,4 +107,22 @@ func extractPort(t *testing.T, url string) int {
 		}
 	}
 	return port
+}
+
+// healthcheck shows the problem a waiting agent reports and exits 1.
+func TestHealthcheckPrintsProblem(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"status":  "error",
+			"version": "v1",
+			"problem": "no API key: run `quantifai-sync install --api-key <key>`",
+		})
+	}))
+	defer srv.Close()
+
+	var out strings.Builder
+	code := runHealthcheck(srv.Client(), extractPort(t, srv.URL), &out)
+	if code != 1 || !strings.Contains(out.String(), "problem: no API key") {
+		t.Fatalf("exit %d, output:\n%s\nwant exit 1 and the problem", code, out.String())
+	}
 }

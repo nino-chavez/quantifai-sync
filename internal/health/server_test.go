@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"net"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 )
@@ -195,5 +196,27 @@ func TestHealthServerBindsToLocalhostOnly(t *testing.T) {
 
 	if resp.StatusCode != http.StatusOK {
 		t.Errorf("expected status 200 from 127.0.0.1, got %d", resp.StatusCode)
+	}
+}
+
+// While the agent waits on a config problem, /health says so: status
+// "error" and the problem itself. Clearing it restores the usual status.
+func TestSnapshotReportsProblem(t *testing.T) {
+	h := NewHealthState("v1")
+	h.SetLastSyncTime(time.Now())
+	h.SetProblem("no API key: run `quantifai-sync install --api-key <key>`")
+
+	b, _ := json.Marshal(h.Snapshot())
+	got := string(b)
+	for _, want := range []string{`"status":"error"`, `"problem":"no API key: run`} {
+		if !strings.Contains(got, want) {
+			t.Errorf("snapshot missing %s:\n%s", want, got)
+		}
+	}
+
+	h.SetProblem("")
+	b, _ = json.Marshal(h.Snapshot())
+	if strings.Contains(string(b), "problem") || !strings.Contains(string(b), `"status":"ok"`) {
+		t.Errorf("after clearing the problem: %s", b)
 	}
 }

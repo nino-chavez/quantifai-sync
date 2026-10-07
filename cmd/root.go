@@ -111,7 +111,9 @@ func runAgent() int {
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGTERM, syscall.SIGINT)
 
-	st, ok := waitFor(loadStartup, configRetryInterval, sigCh, os.Stderr)
+	var waiting waitingHealth
+	st, ok := waitFor(waiting.load, configRetryInterval, sigCh, os.Stderr)
+	waiting.stop()
 	if !ok {
 		return 0
 	}

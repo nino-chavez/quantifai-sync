@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io"
@@ -9,6 +10,7 @@ import (
 
 	"github.com/quantifai/sync/internal/config"
 	"github.com/quantifai/sync/internal/credentials"
+	"github.com/quantifai/sync/internal/health"
 	"github.com/quantifai/sync/internal/logger"
 )
 
@@ -81,4 +83,41 @@ func waitFor[T any](load func() (T, error), interval time.Duration, stop <-chan 
 		case <-time.After(interval):
 		}
 	}
+}
+
+// waitingHealth serves /health while the agent waits for a usable config,
+// reporting the problem with status "error". Without it the health check
+// and the tray saw a refused connection ("Not Running") for an agent that
+// was running and waiting; service managers can only see that it runs.
+type waitingHealth struct {
+	state *health.HealthState
+	srv   *health.Server
+}
+
+// report records the latest problem, starting the server on first use on
+// the configured health port.
+func (w *waitingHealth) report(err error) {
+	if w.srv == nil {
+		cfg, _ := config.Load("", "")
+		w.state = health.NewHealthState(Version)
+		w.srv = health.NewServer(cfg.HealthPort, w.state)
+		go w.srv.ListenAndServe()
+	}
+	w.state.SetProblem(err.Error())
+}
+
+// stop shuts the server down so the agent's own can take the port.
+func (w *waitingHealth) stop() {
+	if w.srv != nil {
+		w.srv.Shutdown(context.Background())
+	}
+}
+
+// load is loadStartup with each problem reported on /health.
+func (w *waitingHealth) load() (startup, error) {
+	st, err := loadStartup()
+	if err != nil {
+		w.report(err)
+	}
+	return st, err
 }
