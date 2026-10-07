@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/quantifai/sync/internal/config"
+	"github.com/quantifai/sync/internal/credentials"
 	"github.com/quantifai/sync/internal/editor"
 	gitpkg "github.com/quantifai/sync/internal/git"
 	"github.com/quantifai/sync/internal/health"
@@ -111,6 +112,16 @@ func runAgent() int {
 		return 0
 	}
 
+	// `install --api-key` stores the key in the OS keyring, so the agent
+	// has to look there too; reading only the config left an installed
+	// agent with no key and a 401 on every cycle.
+	apiKey, keySource, err := credentials.NewManagerWithOSKeyring(cfg.APIKey).ResolveAPIKey()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "no API key: run `quantifai-sync install --api-key <key>`, or set api_key in %s or QUANTIFAI_API_KEY\n", config.DefaultUserConfigPath())
+		return 1
+	}
+	cfg.APIKey = apiKey
+
 	// Initialize logger
 	log, err := logger.New(logger.ParseLevel(cfg.LogLevel), cfg.LogFile)
 	if err != nil {
@@ -120,8 +131,9 @@ func runAgent() int {
 	defer log.Close()
 
 	log.Info("starting quantifai-sync", map[string]any{
-		"version":   Version,
-		"watch_dir": cfg.WatchDir,
+		"version":        Version,
+		"watch_dir":      cfg.WatchDir,
+		"api_key_source": keySource,
 	})
 
 	// Start health server

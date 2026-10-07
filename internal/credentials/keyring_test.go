@@ -93,3 +93,27 @@ func TestCredentialPriorityChain(t *testing.T) {
 		}
 	})
 }
+
+// TestResolveAPIKeyReportsSource covers the agent's startup lookup: the
+// source name it logs must match where the key actually came from.
+func TestResolveAPIKeyReportsSource(t *testing.T) {
+	t.Setenv("QUANTIFAI_API_KEY", "")
+	t.Setenv("AI_OPS_API_KEY", "")
+
+	kr := newFakeKeyring()
+	kr.Set(serviceName(), accountName, "keyring-key")
+	if key, src, err := NewManager(kr, "config-key").ResolveAPIKey(); err != nil || key != "keyring-key" || src != SourceKeyring {
+		t.Errorf("keyring: got (%q, %q, %v)", key, src, err)
+	}
+	if key, src, err := NewManager(&failingKeyring{}, "config-key").ResolveAPIKey(); err != nil || key != "config-key" || src != SourceConfig {
+		t.Errorf("config: got (%q, %q, %v)", key, src, err)
+	}
+	t.Setenv("QUANTIFAI_API_KEY", "env-key")
+	if key, src, err := NewManager(nil, "").ResolveAPIKey(); err != nil || key != "env-key" || src != SourceEnv {
+		t.Errorf("env: got (%q, %q, %v)", key, src, err)
+	}
+	t.Setenv("QUANTIFAI_API_KEY", "")
+	if _, _, err := NewManager(&failingKeyring{}, "").ResolveAPIKey(); !errors.Is(err, ErrNoAPIKey) {
+		t.Errorf("none: got %v", err)
+	}
+}

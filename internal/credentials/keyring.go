@@ -62,32 +62,48 @@ func NewManager(keyring KeyringProvider, configAPIKey string) *Manager {
 	}
 }
 
+// Key sources reported by ResolveAPIKey.
+const (
+	SourceKeyring = "keyring"
+	SourceConfig  = "config"
+	SourceEnv     = "environment"
+)
+
 // RetrieveAPIKey returns the API key using the priority chain:
 // keyring -> config file -> environment variable.
 // Returns ErrNoAPIKey if no key is available from any source.
 func (m *Manager) RetrieveAPIKey() (string, error) {
+	key, _, err := m.ResolveAPIKey()
+	return key, err
+}
+
+// ResolveAPIKey is RetrieveAPIKey plus the name of the source the key came
+// from, so callers can log where a key was found without logging the key.
+// The config loader already folds QUANTIFAI_API_KEY into the config value,
+// so SourceConfig can also mean "set by the environment".
+func (m *Manager) ResolveAPIKey() (key, source string, err error) {
 	// Priority 1: OS keyring
 	if m.keyring != nil {
 		key, err := m.keyring.Get(serviceName(), accountName)
 		if err == nil && key != "" {
-			return key, nil
+			return key, SourceKeyring, nil
 		}
 	}
 
 	// Priority 2: config file value
 	if m.configAPIKey != "" {
-		return m.configAPIKey, nil
+		return m.configAPIKey, SourceConfig, nil
 	}
 
 	// Priority 3: environment variable (new name first, legacy fallback)
 	if key := os.Getenv("QUANTIFAI_API_KEY"); key != "" {
-		return key, nil
+		return key, SourceEnv, nil
 	}
 	if key := os.Getenv("AI_OPS_API_KEY"); key != "" {
-		return key, nil
+		return key, SourceEnv, nil
 	}
 
-	return "", ErrNoAPIKey
+	return "", "", ErrNoAPIKey
 }
 
 // StoreAPIKey persists the API key in the OS keyring.  Returns an error
