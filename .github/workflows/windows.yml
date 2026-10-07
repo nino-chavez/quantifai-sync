@@ -24,6 +24,8 @@ jobs:
         run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
       - name: Logon task (verbose, shows whether the task could run here)
         run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
+      - name: Supervisor (crash restart, no orphaned agent)
+        run: go test -count=1 -v -run "TestSupervise" ./cmd/
       # End to end on the runner (never in `go test`, which a developer runs on
       # their own machine): install registers the QuantifaiSync logon task and
       # stores the key in Credential Manager; the agent must start as this user,
@@ -55,10 +57,30 @@ jobs:
           }
           $health | ConvertTo-Json -Compress
           if ($health.version -ne 'v0.0.0-ci') { Write-Error "unexpected version $($health.version)"; exit 1 }
+          # Crash restart: kill the agent (the process serving /health); the
+          # supervisor must start a new one.
+          $agent = (Get-NetTCPConnection -LocalPort 19876 -State Listen).OwningProcess | Select-Object -First 1
+          "agent pid before kill: $agent"
+          Stop-Process -Id $agent -Force
+          $back = $null
+          foreach ($i in 1..30) {
+            Start-Sleep 1
+            $now = (Get-NetTCPConnection -LocalPort 19876 -State Listen -ErrorAction SilentlyContinue).OwningProcess | Select-Object -First 1
+            if ($now -and $now -ne $agent) { $back = $now; break }
+          }
+          if (-not $back) {
+            if (Test-Path "$qs\agent.log") { Get-Content "$qs\agent.log" -Tail 20 }
+            Write-Error 'agent was not restarted after it was killed'; exit 1
+          }
+          "agent restarted as pid $back"
+          Get-CimInstance Win32_Process -Filter "Name='quantifai-sync.exe'" | Select-Object ProcessId, ParentProcessId, CommandLine | Format-Table -AutoSize | Out-String -Width 300
           & $exe uninstall
           if ($LASTEXITCODE -ne 0) { exit 1 }
           schtasks /query /tn QuantifaiSync *> $null
           if ($LASTEXITCODE -eq 0) { Write-Error 'task still registered after uninstall'; exit 1 }
           Start-Sleep 2
           try { Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 | Out-Null; Write-Error 'agent still running after uninstall'; exit 1 } catch { 'agent stopped' }
+          $left = Get-Process quantifai-sync -ErrorAction SilentlyContinue
+          if ($left) { $left | Format-Table Id, StartTime; Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
+          'no quantifai-sync processes left'
           exit 0

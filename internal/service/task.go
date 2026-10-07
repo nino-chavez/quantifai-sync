@@ -22,9 +22,8 @@ const windowsTaskName = "QuantifaiSync"
 // /run (as install does) replace a running instance instead of being
 // dropped, without reading the task's localized status.
 //
-// There is no crash restart: RestartOnFailure did not restart a run that
-// exited 1 (measured on windows-latest), so it is left out rather than
-// implied. A crashed agent stays down until the next logon.
+// RestartOnFailure is left out: it did not restart a run that exited 1
+// (measured on windows-latest). Crash restart comes from `run --supervise`.
 //
 // Placeholders, in order: user (trigger), user (principal), command,
 // arguments. All are XML-escaped by GenerateTaskXML.
@@ -64,8 +63,9 @@ const taskTemplate = `<?xml version="1.0" encoding="UTF-16"?>
 </Task>
 `
 
-// taskArguments starts the agent with its console window hidden.
-const taskArguments = "run --no-console"
+// taskArguments starts the agent with its console window hidden, under a
+// supervisor that restarts it after a crash.
+const taskArguments = "run --no-console --supervise"
 
 // GenerateTaskXML returns the task definition for user running binPath
 // with args.

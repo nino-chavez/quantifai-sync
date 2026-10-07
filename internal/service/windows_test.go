@@ -67,7 +67,7 @@ func TestTaskRegistersWithLongRunningSettings(t *testing.T) {
 		"<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>",
 		"<LogonTrigger>",
 		"<Command>" + bin + "</Command>",
-		"<Arguments>run --no-console</Arguments>",
+		"<Arguments>run --no-console --supervise</Arguments>",
 	} {
 		if !strings.Contains(stored, want) {
 			t.Errorf("stored task is missing %s", want)
