@@ -119,13 +119,20 @@ jobs:
       # task, so cleanup uses this commit's build from the previous step.
       - name: Self-update under the logon task
         shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
           $qs = Join-Path $env:RUNNER_TEMP 'qsu'
           $exe = Join-Path $qs 'quantifai-sync.exe'
           $tool = Join-Path $env:RUNNER_TEMP 'qs\quantifai-sync.exe'
           New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
           go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.2.9-ci" -o $exe .
-          $latest = (Invoke-RestMethod https://api.github.com/repos/nino-chavez/quantifai-sync/releases/latest).tag_name
+          # Authenticated: the runner's shared IP can exhaust the unauthenticated limit.
+          try {
+            $latest = (Invoke-RestMethod https://api.github.com/repos/nino-chavez/quantifai-sync/releases/latest -Headers @{ Authorization = "Bearer $env:GH_TOKEN" }).tag_name
+          } catch {
+            Write-Error "releases/latest lookup failed: HTTP $($_.Exception.Response.StatusCode.value__) $($_.ErrorDetails.Message)"; exit 1
+          }
           "latest release: $latest"
           $fwd = $qs -replace '\\', '/'
           Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
