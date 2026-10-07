@@ -1,7 +1,9 @@
 package cmd
 
 import (
+	"errors"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -49,7 +51,7 @@ func TestSuperviseHelper(t *testing.T) {
 		}
 		os.Setenv("QUANTIFAI_SUPERVISE_HELPER", "echo")
 		l, _ := logger.New(logger.LevelInfo, "")
-		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, l))
+		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, helperHandoff(), nil, l))
 	case "sleep":
 		os.WriteFile(arg, []byte(strconv.Itoa(os.Getpid())), 0600)
 		time.Sleep(60 * time.Second)
@@ -60,8 +62,13 @@ func TestSuperviseHelper(t *testing.T) {
 		}
 		os.Setenv("QUANTIFAI_SUPERVISE_HELPER", "sleep:"+arg)
 		l, _ := logger.New(logger.LevelError, "")
-		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, l))
+		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, helperHandoff(), nil, l))
 	}
+}
+
+// helperHandoff is a handoff file for a supervisor run as a test helper.
+func helperHandoff() string {
+	return filepath.Join(os.TempDir(), "quantifai-sync-test-handoff-"+strconv.Itoa(os.Getpid()))
 }
 
 // The supervisor restarts a child that exits with an error and stops once
@@ -71,7 +78,7 @@ func TestSuperviseRestartsUntilCleanExit(t *testing.T) {
 	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "crash-twice:"+marks)
 	l, _ := logger.New(logger.LevelError, "")
 
-	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, l)
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, t.TempDir()+"/handoff", nil, l)
 	if code != 0 {
 		t.Fatalf("supervise returned %d, want 0 after the child exits cleanly", code)
 	}
@@ -90,7 +97,7 @@ func TestSuperviseRestartsAtOnceAfterUpdate(t *testing.T) {
 	l, _ := logger.New(logger.LevelError, "")
 
 	start := time.Now()
-	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, l)
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, t.TempDir()+"/handoff", nil, l)
 	elapsed := time.Since(start)
 	got, _ := os.ReadFile(runs)
 	if code != 0 || string(got) != "[][v9.9.9]" {
@@ -98,5 +105,72 @@ func TestSuperviseRestartsAtOnceAfterUpdate(t *testing.T) {
 	}
 	if elapsed > 10*time.Second {
 		t.Fatalf("restart after an update took %v; it must not wait for the 20s crash delay", elapsed)
+	}
+}
+
+// After an update, a supervisor that can start a new one on the updated
+// binary (the Windows logon task) does so and stops, leaving the installed
+// release in the handoff file for the new supervisor.
+func TestSuperviseHandsOverToRestartedSupervisor(t *testing.T) {
+	runs := t.TempDir() + "/runs"
+	handoff := t.TempDir() + "/handoff"
+	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
+	t.Setenv(updater.UpdatedToEnv, "")
+	l, _ := logger.New(logger.LevelError, "")
+
+	restarts := 0
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
+		restarts++
+		return nil
+	}, l)
+	if code != 0 || restarts != 1 {
+		t.Fatalf("supervise returned %d after %d restarts, want 0 after 1", code, restarts)
+	}
+	if got, _ := os.ReadFile(runs); string(got) != "[]" {
+		t.Fatalf("runs received %s, want [] only: the new supervisor starts the next agent", got)
+	}
+	if got, _ := os.ReadFile(handoff); string(got) != "v9.9.9" {
+		t.Fatalf("handoff holds %q, want v9.9.9 for the new supervisor", got)
+	}
+}
+
+// If starting a new supervisor fails, this one starts the new agent itself
+// and passes on the release, as before.
+func TestSuperviseRestartsAgentWhenHandoverFails(t *testing.T) {
+	runs := t.TempDir() + "/runs"
+	handoff := t.TempDir() + "/handoff"
+	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
+	t.Setenv(updater.UpdatedToEnv, "")
+	l, _ := logger.New(logger.LevelError, "")
+
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
+		return errors.New("task not found")
+	}, l)
+	if got, _ := os.ReadFile(runs); code != 0 || string(got) != "[][v9.9.9]" {
+		t.Fatalf("runs received %s (exit %d), want [][v9.9.9]", got, code)
+	}
+}
+
+// A supervisor started in place of one that handed over gives the release
+// it finds in the handoff file to its first agent, and removes the file.
+func TestSuperviseStartsWithHandedOverRelease(t *testing.T) {
+	runs := t.TempDir() + "/runs"
+	handoff := t.TempDir() + "/handoff"
+	if err := os.WriteFile(handoff, []byte("v9.9.9\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
+	t.Setenv(updater.UpdatedToEnv, "")
+	l, _ := logger.New(logger.LevelError, "")
+
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
+		t.Error("restarted the supervisor, but the first agent should not install anything")
+		return nil
+	}, l)
+	if got, _ := os.ReadFile(runs); code != 0 || string(got) != "[v9.9.9]" {
+		t.Fatalf("runs received %s (exit %d), want [v9.9.9]: the first agent must get the handed-over release", got, code)
+	}
+	if _, err := os.Stat(handoff); !os.IsNotExist(err) {
+		t.Fatalf("handoff file still there after start (err %v); a later start would reuse it", err)
 	}
 }

@@ -11,6 +11,10 @@ import (
 // windowsTaskName is the Task Scheduler task that runs the agent.
 const windowsTaskName = "QuantifaiSync"
 
+// WindowsTaskName is the logon task's name, for the supervisor to start
+// it again on an updated binary.
+const WindowsTaskName = windowsTaskName
+
 // taskTemplate is the Task Scheduler definition for the Windows agent: a
 // per-user logon task, the counterpart of the macOS LaunchAgent and the
 // systemd user unit. It runs as the installing user (InteractiveToken,
@@ -74,6 +78,13 @@ func WindowsLogPath() string {
 		dir = os.TempDir()
 	}
 	return filepath.Join(dir, "quantifai", "quantifai-sync.log")
+}
+
+// SupervisorHandoffPath is where a supervised agent writes the release it
+// installed. It sits beside the log rather than in a temp file because it
+// has to outlive the supervisor: the logon task's next instance reads it.
+func SupervisorHandoffPath() string {
+	return filepath.Join(filepath.Dir(WindowsLogPath()), "supervisor-handoff")
 }
 
 // taskArguments starts the agent with its console window hidden, under a
