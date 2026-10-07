@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,42 +20,58 @@ func defaultQueuePath() string {
 	return filepath.Join(home, ".config", "quantifai", "commit-events.jsonl")
 }
 
+// lockQueue takes an exclusive flock on a sidecar file next to the queue
+// and returns the unlock function. Locking the sidecar rather than the
+// queue file itself is what lets AckQueue replace the queue with an atomic
+// rename: an appender that opens the queue only after holding this lock
+// can never be left writing into a file that was just renamed away.
+func lockQueue(path string) (func(), error) {
+	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+		return nil, fmt.Errorf("create queue dir: %w", err)
+	}
+	lf, err := os.OpenFile(path+".lock", os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, fmt.Errorf("open queue lock: %w", err)
+	}
+	if err := syscall.Flock(int(lf.Fd()), syscall.LOCK_EX); err != nil {
+		lf.Close()
+		return nil, fmt.Errorf("lock queue: %w", err)
+	}
+	return func() {
+		syscall.Flock(int(lf.Fd()), syscall.LOCK_UN)
+		lf.Close()
+	}, nil
+}
+
 // QueueCommitEvent appends a commit event as a JSON line to the local
-// queue file.  File locking (flock) prevents concurrent writes from
-// multiple repos' post-commit hooks.  This function does no network
-// I/O and returns immediately.
+// queue file.  The queue lock prevents concurrent writes from multiple
+// repos' post-commit hooks.  This function does no network I/O and
+// returns immediately.
 func QueueCommitEvent(event *CommitEvent) error {
 	return queueCommitEvent(defaultQueuePath(), event)
 }
 
 func queueCommitEvent(path string, event *CommitEvent) error {
-	// Ensure parent directory exists
-	if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
-		return fmt.Errorf("create queue dir: %w", err)
-	}
-
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
-	if err != nil {
-		return fmt.Errorf("open queue file: %w", err)
-	}
-	defer f.Close()
-
-	// Acquire exclusive lock
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock queue file: %w", err)
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-
 	data, err := json.Marshal(event)
 	if err != nil {
 		return fmt.Errorf("marshal event: %w", err)
 	}
 	data = append(data, '\n')
 
+	unlock, err := lockQueue(path)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0600)
+	if err != nil {
+		return fmt.Errorf("open queue file: %w", err)
+	}
+	defer f.Close()
 	if _, err := f.Write(data); err != nil {
 		return fmt.Errorf("write event: %w", err)
 	}
-
 	return nil
 }
 
@@ -68,21 +83,17 @@ func ReadQueue(path string, max int) ([]*CommitEvent, int64, error) {
 	if path == "" {
 		path = defaultQueuePath()
 	}
-	f, err := os.Open(path)
+	unlock, err := lockQueue(path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer unlock()
+
+	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, 0, nil
 		}
-		return nil, 0, fmt.Errorf("open queue file: %w", err)
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH); err != nil {
-		return nil, 0, fmt.Errorf("lock queue file: %w", err)
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-
-	data, err := io.ReadAll(f)
-	if err != nil {
 		return nil, 0, fmt.Errorf("read queue file: %w", err)
 	}
 	// Only whole lines; a hook may be mid-append.
@@ -108,7 +119,10 @@ func ReadQueue(path string, max int) ([]*CommitEvent, int64, error) {
 }
 
 // AckQueue removes the first n bytes of the queue (the events returned by
-// ReadQueue), keeping anything a hook appended since.
+// ReadQueue), keeping anything a hook appended since. The remainder is
+// written to a temp file, synced, and renamed over the queue, so a crash at
+// any point leaves either the old queue or the new one, never a truncated
+// file.
 func AckQueue(path string, n int64) error {
 	if path == "" {
 		path = defaultQueuePath()
@@ -116,29 +130,40 @@ func AckQueue(path string, n int64) error {
 	if n <= 0 {
 		return nil
 	}
-	f, err := os.OpenFile(path, os.O_RDWR, 0600)
+	unlock, err := lockQueue(path)
 	if err != nil {
-		return fmt.Errorf("open queue file: %w", err)
+		return err
 	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return fmt.Errorf("lock queue file: %w", err)
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	defer unlock()
 
-	data, err := io.ReadAll(f)
+	data, err := os.ReadFile(path)
 	if err != nil {
 		return fmt.Errorf("read queue file: %w", err)
 	}
 	if n > int64(len(data)) {
 		n = int64(len(data))
 	}
-	rest := data[n:]
-	if err := f.Truncate(0); err != nil {
-		return fmt.Errorf("truncate queue file: %w", err)
+	tmp, err := os.CreateTemp(filepath.Dir(path), filepath.Base(path)+".tmp-*")
+	if err != nil {
+		return fmt.Errorf("create temp queue: %w", err)
 	}
-	if _, err := f.WriteAt(rest, 0); err != nil {
-		return fmt.Errorf("rewrite queue file: %w", err)
+	defer os.Remove(tmp.Name()) // no-op after a successful rename
+	if _, err := tmp.Write(data[n:]); err != nil {
+		tmp.Close()
+		return fmt.Errorf("write temp queue: %w", err)
+	}
+	if err := tmp.Sync(); err != nil {
+		tmp.Close()
+		return fmt.Errorf("sync temp queue: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return fmt.Errorf("close temp queue: %w", err)
+	}
+	if err := os.Chmod(tmp.Name(), 0600); err != nil {
+		return fmt.Errorf("chmod temp queue: %w", err)
+	}
+	if err := os.Rename(tmp.Name(), path); err != nil {
+		return fmt.Errorf("replace queue: %w", err)
 	}
 	return nil
 }

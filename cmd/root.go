@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"syscall"
 	"time"
 
@@ -206,6 +207,10 @@ func runAgent() int {
 	}
 }
 
+// largeCycleMessages is the cycle size after which memory is returned to
+// the OS (the first cycle reads every session file once).
+const largeCycleMessages = 10_000
+
 // runCycle collects every session that gained messages since the committed
 // offsets, sends them, and commits the new offsets only when every batch
 // was acknowledged with counts that match what was sent. A failed cycle
@@ -229,6 +234,17 @@ func runCycle(
 		log.Warn("failed to read session file", map[string]any{"path": path, "error": err.Error()})
 	}
 
+	// Commit events are independent of session files, so a stuck session
+	// batch must not hold them back.
+	if cfg.GitEnabled && cfg.APIKey != "" {
+		if n := gitpkg.FlushCommitQueue(ctx, "", snd.Send, liteMode, log); n > 0 {
+			log.Info("commit events stored", map[string]any{"count": n})
+		}
+	}
+
+	// A batch the server keeps rejecting stalls the cycle here on purpose:
+	// nothing is committed, /health turns degraded, and the error is logged
+	// every cycle. Stalling loudly is the alternative to losing data quietly.
 	batches := ingest.BuildBatches(cyc.Groups, cfg.BatchSize)
 	for i, b := range batches {
 		if _, err := snd.Send(ctx, b); err != nil {
@@ -253,15 +269,13 @@ func runCycle(
 		}
 	}
 
-	// Flush queued commit events through the same checked sender.
-	if cfg.GitEnabled && cfg.APIKey != "" {
-		if n := gitpkg.FlushCommitQueue(ctx, "", snd.Send, liteMode, log); n > 0 {
-			log.Info("commit events stored", map[string]any{"count": n})
-		}
-	}
-
 	healthState.SetLastSyncTime(time.Now())
 	healthState.SetRecordsBuffered(0)
+	if cyc.Messages() >= largeCycleMessages {
+		// A backfill decodes gigabytes of JSON; hand that memory back
+		// rather than holding it for the life of a background agent.
+		debug.FreeOSMemory()
+	}
 	if len(batches) > 0 {
 		log.Info("sync cycle complete", map[string]any{
 			"batches":     len(batches),
