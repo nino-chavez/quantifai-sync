@@ -18,7 +18,9 @@ const windowsTaskName = "QuantifaiSync"
 //
 // Settings Task Scheduler gets wrong for a long-running agent are set
 // explicitly: no execution time limit (the default stops a task after 72
-// hours), and start and keep running on battery.
+// hours), and start and keep running on battery. StopExisting makes a
+// /run (as install does) replace a running instance instead of being
+// dropped, without reading the task's localized status.
 //
 // There is no crash restart: RestartOnFailure did not restart a run that
 // exited 1 (measured on windows-latest), so it is left out rather than
@@ -45,7 +47,7 @@ const taskTemplate = `<?xml version="1.0" encoding="UTF-16"?>
     </Principal>
   </Principals>
   <Settings>
-    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>
+    <MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>
     <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>
     <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>
     <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>
