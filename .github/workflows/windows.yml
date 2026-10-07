@@ -61,3 +61,4 @@ jobs:
           if ($LASTEXITCODE -eq 0) { Write-Error 'task still registered after uninstall'; exit 1 }
           Start-Sleep 2
           try { Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 | Out-Null; Write-Error 'agent still running after uninstall'; exit 1 } catch { 'agent stopped' }
+          exit 0
