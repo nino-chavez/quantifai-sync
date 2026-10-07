@@ -27,8 +27,10 @@ quantifai-sync uninstall
 ```
 
 On Windows, `install` registers a Task Scheduler task that starts the agent at logon, as the
-user who ran `install`. Task Scheduler only lets administrators register tasks, so run `install`
-from an elevated prompt signed in as that user; it prints the account it registered.
+user who ran `install`, and stores the API key in that user's Credential Manager. Run it from
+an ordinary prompt, not an elevated one: no administrator rights are needed, and elevating with
+another account's credentials would install the agent for that account. It prints the account
+it registered.
 
 ## What it does
 

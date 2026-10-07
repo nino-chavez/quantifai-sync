@@ -27,9 +27,10 @@ const (
 
 // Windows implements the Installer interface for Windows. It registers a
 // per-user Task Scheduler logon task (see taskTemplate) that runs the
-// current executable as the installing user. Registering a task needs an
-// elevated prompt; run install elevated as the user the agent should
-// run as, because the task is created for the account that runs install.
+// current executable as the installing user. No elevation is needed: a
+// standard user registered this task for themselves on windows-latest.
+// Install must run as the user the agent should run as, because the task
+// and the Credential Manager key belong to the account that runs install.
 type Windows struct {
 	taskName string
 	binPath  string
@@ -63,11 +64,11 @@ func (w *Windows) Install() error {
 		return fmt.Errorf("service: could not determine the current user")
 	}
 	// Elevating with another administrator's credentials runs install as
-	// that administrator, inside the signed-in user's session. The task
-	// would then watch the administrator's profile instead.
+	// that administrator, inside the signed-in user's session. The task and
+	// the key would then belong to the administrator instead.
 	if signedIn := sessionUser(); signedIn != "" && !strings.EqualFold(signedIn, w.user) {
 		return fmt.Errorf("service: install is running as %s, but %s is signed in to this session; "+
-			"the agent runs as the account that installs it, so run install elevated as %s", w.user, signedIn, signedIn)
+			"the agent runs as the account that installs it, so run install as %s from a prompt that is not elevated", w.user, signedIn, signedIn)
 	}
 	removeService(oldWindowsServiceName)
 	if err := w.register(); err != nil {
