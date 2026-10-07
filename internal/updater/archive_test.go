@@ -14,7 +14,9 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // writeArchive builds a release-style archive at path holding the given
@@ -99,10 +101,11 @@ var releaseLayout = map[string][2]string{
 	"windows/amd64": {"quantifai-sync-windows-amd64.zip", "quantifai-sync-windows-amd64.exe"},
 }
 
-// CheckAndApply against a fake release laid out like the real ones:
-// find the archive, verify its .sha256, extract the binary, replace the
-// executable, and do not re-apply the same release on the next check.
-func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
+// fakeRelease serves a v9.9.9 release laid out like the real ones and
+// returns an updater at v0.3.0 aimed at it, the path it will replace, and
+// a count of archive downloads.
+func fakeRelease(t *testing.T) (*GithubUpdater, string, *atomic.Int32) {
+	t.Helper()
 	layout, ok := releaseLayout[runtime.GOOS+"/"+runtime.GOARCH]
 	if !ok {
 		t.Skipf("no release asset for %s/%s", runtime.GOOS, runtime.GOARCH)
@@ -115,7 +118,7 @@ func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
 	data, _ := os.ReadFile(archive)
 	sum := sha256.Sum256(data)
 
-	downloads := 0
+	downloads := new(atomic.Int32)
 	mux := http.NewServeMux()
 	var srvURL string
 	mux.HandleFunc("/repos/o/r/releases/latest", func(w http.ResponseWriter, r *http.Request) {
@@ -130,7 +133,7 @@ func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
 	mux.HandleFunc("/dl/", func(w http.ResponseWriter, r *http.Request) {
 		switch name := strings.TrimPrefix(r.URL.Path, "/dl/"); name {
 		case asset:
-			downloads++
+			downloads.Add(1)
 			w.Write(data)
 		case asset + ".sha256":
 			fmt.Fprintf(w, "%s  %s\n", hex.EncodeToString(sum[:]), asset)
@@ -139,19 +142,31 @@ func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
 		}
 	})
 	server := httptest.NewServer(mux)
-	defer server.Close()
+	t.Cleanup(server.Close)
 	srvURL = server.URL
 
 	exe := filepath.Join(dir, "installed")
-	os.WriteFile(exe, []byte("old binary"), 0755)
+	if err := os.WriteFile(exe, []byte("old binary"), 0755); err != nil {
+		t.Fatal(err)
+	}
 
 	g := &GithubUpdater{
 		log:        newDiscardLogger(),
 		version:    "v0.3.0",
 		repo:       "o/r",
+		interval:   time.Hour,
 		client:     &http.Client{Transport: &rewriteTransport{base: http.DefaultTransport, target: server.URL}},
 		executable: func() (string, error) { return exe, nil },
+		applied:    make(chan struct{}, 1),
 	}
+	return g, exe, downloads
+}
+
+// CheckAndApply against a fake release laid out like the real ones:
+// find the archive, verify its .sha256, extract the binary, replace the
+// executable, and do not re-apply the same release on the next check.
+func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
+	g, exe, downloads := fakeRelease(t)
 
 	applied, err := g.CheckAndApply(context.Background())
 	if err != nil || !applied {
@@ -165,7 +180,38 @@ func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
 	if err != nil || applied {
 		t.Fatalf("second CheckAndApply = %v, %v; want false, nil", applied, err)
 	}
-	if downloads != 1 {
-		t.Fatalf("archive downloaded %d times, want 1", downloads)
+	if n := downloads.Load(); n != 1 {
+		t.Fatalf("archive downloaded %d times, want 1", n)
+	}
+}
+
+// Run installs the update, signals Applied once, and stops, so the caller
+// can restart into the new binary.
+func TestRunSignalsAppliedAndStops(t *testing.T) {
+	g, exe, downloads := fakeRelease(t)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		g.Run(ctx)
+		close(done)
+	}()
+
+	select {
+	case <-g.Applied():
+	case <-time.After(10 * time.Second):
+		t.Fatal("Applied did not fire after an update was available")
+	}
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("Run kept running after applying an update")
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "new binary v9.9.9" {
+		t.Fatalf("installed %q, want the new binary", got)
+	}
+	if n := downloads.Load(); n != 1 {
+		t.Fatalf("archive downloaded %d times, want 1", n)
 	}
 }

@@ -32,6 +32,9 @@ type GithubUpdater struct {
 
 	// executable locates the binary to replace; nil means os.Executable.
 	executable func() (string, error)
+
+	// applied is signalled once Run installs an update.
+	applied chan struct{}
 }
 
 // githubRelease is the subset of the GitHub Releases API response we need.
@@ -56,7 +59,13 @@ func NewGithubUpdater(version, updateChannel, repo string, interval time.Duratio
 		repo:          repo,
 		interval:      interval,
 		client:        &http.Client{Timeout: 30 * time.Second},
+		applied:       make(chan struct{}, 1),
 	}
+}
+
+// Applied receives once when Run has installed an update.
+func (g *GithubUpdater) Applied() <-chan struct{} {
+	return g.applied
 }
 
 // CheckAndApply checks GitHub for a newer release. If found, it downloads
@@ -198,12 +207,11 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 }
 
 // Run starts the background update loop. It checks on startup, then
-// every interval. Blocks until ctx is cancelled.
+// every interval. Blocks until ctx is cancelled, or returns once an update
+// is installed, after signalling Applied.
 func (g *GithubUpdater) Run(ctx context.Context) {
-	if _, err := g.CheckAndApply(ctx); err != nil {
-		g.log.Warn("startup update check failed", map[string]any{
-			"error": err.Error(),
-		})
+	if g.check(ctx, "startup") {
+		return
 	}
 
 	ticker := time.NewTicker(g.interval)
@@ -212,15 +220,33 @@ func (g *GithubUpdater) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			if _, err := g.CheckAndApply(ctx); err != nil {
-				g.log.Warn("periodic update check failed", map[string]any{
-					"error": err.Error(),
-				})
+			if g.check(ctx, "periodic") {
+				return
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// check runs one update check. When it installs an update it signals
+// Applied and returns true.
+func (g *GithubUpdater) check(ctx context.Context, when string) bool {
+	applied, err := g.CheckAndApply(ctx)
+	if err != nil {
+		g.log.Warn(when+" update check failed", map[string]any{
+			"error": err.Error(),
+		})
+		return false
+	}
+	if !applied {
+		return false
+	}
+	select {
+	case g.applied <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // fetchLatestRelease queries the GitHub API for the latest release.

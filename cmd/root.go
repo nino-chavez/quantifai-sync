@@ -203,6 +203,25 @@ func runAgent() int {
 			})
 			cancel()
 			return gracefulShutdown(stateMgr, log)
+
+		case <-u.Applied():
+			// Reached only between cycles, so no sync is cut off.
+			if !restartsInPlace {
+				log.Info("update installed; it takes effect when the agent next starts", nil)
+				continue
+			}
+			log.Info("update installed, restarting into the new binary", nil)
+			cancel()
+			if code := gracefulShutdown(stateMgr, log); code != 0 {
+				return code
+			}
+			err := restartInPlace()
+			// A non-zero exit makes launchd (KeepAlive) and systemd
+			// (Restart=on-failure) start the new binary instead.
+			log.Error("restart into the new binary failed; exiting so the service manager restarts it", map[string]any{
+				"error": err.Error(),
+			})
+			return 1
 		}
 	}
 }
