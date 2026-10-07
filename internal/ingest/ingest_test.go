@@ -266,19 +266,59 @@ func TestEstimateCost(t *testing.T) {
 	}
 }
 
+// Cases mirror apps/app/src/lib/attribution/project-path.test.ts in the
+// quantifai repo; path spellings are real production project_path shapes.
 func TestNormalizeProjectPath(t *testing.T) {
-	cases := []struct{ dir, cwd, path, name string }{
-		{"-Users-a-repo", "/Users/a/repo", "/Users/a/repo", "repo"},
-		{"x", "/Users/a/repo/.claude/worktrees/agent-1/sub", "/Users/a/repo", "repo"},
-		{"x", "/Users/a/repo/.worktrees/b", "/Users/a/repo/.worktrees/b", "b"},
-		{"-Users-a-repo", "", "Users-a-repo", "Users-a-repo"},
-		{"-Users-a-repo", "relative/path", "Users-a-repo", "Users-a-repo"},
+	cases := []struct {
+		dir, cwd, path, name string
+		normalized           bool
+	}{
+		{"-Users-a-repo", "/Users/a/repo", "/Users/a/repo", "repo", true},
+		{"-Users-nino-Workspace-dev-wip-quantifai-next", "/Users/nino/Workspace/dev/wip/quantifai-next", "/Users/nino/Workspace/dev/wip/quantifai-next", "quantifai-next", true},
+		// Fallback: the raw encoded name, undecoded.
+		{"-Users-nino-Workspace-dev-wip-quantifai-next", "", "Users-nino-Workspace-dev-wip-quantifai-next", "Users-nino-Workspace-dev-wip-quantifai-next", false},
+		{"-some-dir", "relative/path", "some-dir", "some-dir", false},
+		{"-", "/", "/", "/", true},
+		// <repo>/.claude/worktrees/<agent-id>[/subdir]
+		{"x", "/Users/nino/Workspace/dev/wip/quantifai-next/.claude/worktrees/agent-a77504b022bdad251", "/Users/nino/Workspace/dev/wip/quantifai-next", "quantifai-next", true},
+		{"x", "/Users/nino/Workspace/dev/wip/quantifai-next/.claude/worktrees/agent-xyz/apps/app", "/Users/nino/Workspace/dev/wip/quantifai-next", "quantifai-next", true},
+		// <repo>/.worktrees/<branch>[/subdir], branch may contain slashes.
+		{"x", "/Users/nino/Workspace/dev/apps/minder/.worktrees/s7-marquee", "/Users/nino/Workspace/dev/apps/minder", "minder", true},
+		{"x", "/Users/nino/Workspace/dev/apps/letspepper/.worktrees/feat/gallery-announce", "/Users/nino/Workspace/dev/apps/letspepper", "letspepper", true},
+		{"x", "/Users/nino/Workspace/dev/apps/minder/.worktrees/port-jump-points/ios/Minder", "/Users/nino/Workspace/dev/apps/minder", "minder", true},
+		// ~/.codex/worktrees/<id>/<repo>[/subdir]: keep through <repo>.
+		{"x", "/Users/nino/.codex/worktrees/672f/630-marketing-automation/site", "/Users/nino/.codex/worktrees/672f/630-marketing-automation", "630-marketing-automation", true},
+		{"x", "/Users/nino/.codex/worktrees/672f/630-marketing-automation", "/Users/nino/.codex/worktrees/672f/630-marketing-automation", "630-marketing-automation", true},
+		// Nested: cut at the EARLIEST marker.
+		{"x", "/dev/apps/quantifai/quantifai/.worktrees/fix/git-event-linking/.claude/worktrees/agent-abc", "/dev/apps/quantifai/quantifai", "quantifai", true},
+		// TS repoKey applies repoRoot to the already-collapsed path, so the
+		// name and the path can disagree here. Ported as-is for parity.
+		{"x", "/Users/nino/.codex/worktrees/672f/blog/sub/.worktrees/b", "/Users/nino/.codex/worktrees/672f/blog/sub", "blog", true},
 	}
 	for _, c := range cases {
-		path, name, _ := NormalizeProjectPath(c.dir, c.cwd)
-		if path != c.path || name != c.name {
-			t.Errorf("(%q,%q): got (%q,%q) want (%q,%q)", c.dir, c.cwd, path, name, c.path, c.name)
+		path, name, normalized := NormalizeProjectPath(c.dir, c.cwd)
+		if path != c.path || name != c.name || normalized != c.normalized {
+			t.Errorf("(%q,%q): got (%q,%q,%v) want (%q,%q,%v)", c.dir, c.cwd, path, name, normalized, c.path, c.name, c.normalized)
 		}
+	}
+}
+
+func TestRepoKeyJoinsEverySpelling(t *testing.T) {
+	spellings := []string{
+		"/Users/nino/Workspace/dev/wip/atelier",                            // pre-reorg location
+		"/Users/nino/Workspace/dev/labs/atelier",                           // current location
+		"/Users/nino.chavez/Workspace/dev/wip/atelier",                     // the other Mac
+		"/Users/nino/Workspace/dev/labs/atelier/.worktrees/feat/x",         // workspace worktree
+		"/Users/nino/Workspace/dev/labs/atelier/.claude/worktrees/agent-1", // agent worktree
+		"/Users/nino/.codex/worktrees/002b/atelier",                        // Codex worktree
+	}
+	for _, p := range spellings {
+		if got := repoKey(p); got != "atelier" {
+			t.Errorf("repoKey(%q) = %q, want atelier", p, got)
+		}
+	}
+	if repoKey("/Users/nino/Workspace/dev/apps/photography-vnext-p1") == repoKey("/Users/nino/Workspace/dev/apps/photography") {
+		t.Error("photography-vnext-p1 must not share photography's key")
 	}
 }
 

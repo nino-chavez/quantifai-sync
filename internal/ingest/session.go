@@ -3,6 +3,7 @@ package ingest
 import (
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 )
 
@@ -136,30 +137,64 @@ func merge(sessionID, projectPath string, parts []*sessionPart) Session {
 
 func strPtr(s string) *string { return &s }
 
-// worktreeMarker matches the server's WORKTREE_MARKER. Only this suffix is
-// collapsed; collapsing anything else would key rows differently from the
-// reference importer.
-const worktreeMarker = "/.claude/worktrees/"
+// Worktree collapse ports repoRoot from the reference importer
+// (apps/app/src/lib/attribution/project-path.ts). A cwd inside a linked
+// worktree belongs to the same repo as the main checkout, so it keys to the
+// repo root. Three spellings exist in stored sessions:
+//
+//	<repo>/.claude/worktrees/<agent-id>[/subdir]   Claude Code agent worktrees
+//	<repo>/.worktrees/<branch>[/subdir]            workspace convention; <branch> may contain slashes
+//	~/.codex/worktrees/<id>/<repo>[/subdir]        Codex worktrees, repo name after the id
+//
+// Any divergence from the TS rules files one session under two unit keys.
+var inRepoWorktreeMarkers = []string{"/.claude/worktrees/", "/.worktrees/"}
+
+var codexWorktreeRE = regexp.MustCompile(`^(.*/\.codex/worktrees/[^/]+/[^/]+)(?:/.*)?$`)
+
+// repoRoot is the checkout root a path belongs to. It cuts at the EARLIEST
+// in-repo marker, so an agent worktree nested inside a workspace worktree
+// (<repo>/.worktrees/<branch>/.claude/worktrees/<agent>) still resolves to
+// <repo>. A Codex worktree is its own root.
+func repoRoot(cwd string) string {
+	cut := -1
+	for _, marker := range inRepoWorktreeMarkers {
+		if i := strings.Index(cwd, marker); i != -1 && (cut == -1 || i < cut) {
+			cut = i
+		}
+	}
+	if cut != -1 {
+		return cwd[:cut]
+	}
+	if m := codexWorktreeRE.FindStringSubmatch(cwd); m != nil {
+		return m[1]
+	}
+	return cwd
+}
+
+// repoKey ports repoKey: the last path segment of the worktree-collapsed
+// path, or the path itself when it has no segments ("/").
+func repoKey(path string) string {
+	collapsed := repoRoot(path)
+	var last string
+	for _, s := range strings.Split(collapsed, "/") {
+		if s != "" {
+			last = s
+		}
+	}
+	if last == "" {
+		return collapsed
+	}
+	return last
+}
 
 // NormalizeProjectPath ports normalizeProjectPath. A real absolute cwd wins;
 // otherwise the encoded directory name, minus its leading dash, is the key.
+// The name applies repoRoot a second time, as the TS repoKey does, so a
+// Codex worktree subdirectory holding a .worktrees/ path still names the repo.
 func NormalizeProjectPath(projectDirName, sampleCwd string) (projectPath, repoName string, normalized bool) {
 	if strings.HasPrefix(sampleCwd, "/") {
-		collapsed := sampleCwd
-		if i := strings.Index(collapsed, worktreeMarker); i != -1 {
-			collapsed = collapsed[:i]
-		}
-		repoName = collapsed
-		var segs []string
-		for _, s := range strings.Split(collapsed, "/") {
-			if s != "" {
-				segs = append(segs, s)
-			}
-		}
-		if len(segs) > 0 {
-			repoName = segs[len(segs)-1]
-		}
-		return collapsed, repoName, true
+		collapsed := repoRoot(sampleCwd)
+		return collapsed, repoKey(collapsed), true
 	}
 	raw := strings.TrimPrefix(projectDirName, "-")
 	return raw, raw, false
