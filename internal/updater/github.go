@@ -182,7 +182,7 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 		return false, fmt.Errorf("resolve symlinks: %w", err)
 	}
 
-	if err := atomicReplace(binFile, currentBinary); err != nil {
+	if err := replaceExecutable(binFile, currentBinary); err != nil {
 		return false, fmt.Errorf("replace binary: %w", err)
 	}
 	// The running process is still the old binary until it restarts; record
