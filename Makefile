@@ -12,9 +12,14 @@ build:
 	go build $(LDFLAGS) -o $(BINARY) .
 
 ## install: Build, copy to INSTALL_DIR, and register the OS service
+# The binary goes in under a temporary name and is renamed over the old one,
+# so it gets a new inode. A plain cp over a binary that has already run keeps
+# the inode, and macOS then SIGKILLs the new binary on every exec: the
+# kernel's code-signature cache is tied to the old vnode.
 install: build
 	@mkdir -p $(INSTALL_DIR)
-	cp $(BINARY) $(INSTALL_DIR)/$(BINARY)
+	install -m 0755 $(BINARY) $(INSTALL_DIR)/.$(BINARY).new
+	mv -f $(INSTALL_DIR)/.$(BINARY).new $(INSTALL_DIR)/$(BINARY)
 	$(INSTALL_DIR)/$(BINARY) install
 
 ## uninstall: Stop/remove the OS service and delete the binary
