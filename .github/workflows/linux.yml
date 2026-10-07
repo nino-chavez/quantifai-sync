@@ -47,6 +47,12 @@ jobs:
           echo "api_key = 'ci-not-a-real-key'" >> ~/.config/quantifai/config.toml
           for _ in $(seq 1 45); do s="$(status)"; [ "$s" = Syncing ] && break; sleep 1; done
           echo "after the key: $s"
+          sleep 5
           systemctl --user status quantifai-sync --no-pager | head -8 || true
+          active="$(systemctl --user is-active quantifai-sync || true)"
+          restarts="$(systemctl --user show -p NRestarts --value quantifai-sync)"
+          echo "active: $active, restarts: $restarts"
           "$qs/quantifai-sync" uninstall
           [ "$s" = Syncing ] || { echo "::error::want 'Syncing', got: '$s'"; exit 1; }
+          # "Syncing" is sent before the first cycle; it must also stay up.
+          [ "$active" = active ] && [ "$restarts" = 0 ] || { echo "::error::agent did not stay running (active=$active, restarts=$restarts)"; exit 1; }
