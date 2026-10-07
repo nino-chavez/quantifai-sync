@@ -1,3 +1,5 @@
+//go:build !windows
+
 package updater
 
 // replaceExecutable installs src as the executable at dst. On unix a
