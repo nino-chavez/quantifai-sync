@@ -40,6 +40,9 @@ type GithubUpdater struct {
 
 	// applied is signalled once Run installs an update.
 	applied chan struct{}
+
+	// retryBase overrides defaultRetryBase (tests).
+	retryBase time.Duration
 }
 
 // githubRelease is the subset of the GitHub Releases API response we need.
@@ -220,46 +223,58 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 }
 
 // Run starts the background update loop. It checks on startup, then
-// every interval. Blocks until ctx is cancelled, or returns once an update
-// is installed, after signalling Applied.
+// every interval. A check that fails for a reason that may clear up on its
+// own (see retryable) is retried after a minute, then two, four and so on,
+// up to the interval, instead of waiting the whole interval. Blocks until
+// ctx is cancelled, or returns once an update is installed, after
+// signalling Applied.
 func (g *GithubUpdater) Run(ctx context.Context) {
-	if g.check(ctx, "startup") {
-		return
+	base := g.retryBase
+	if base <= 0 {
+		base = defaultRetryBase
 	}
-
-	ticker := time.NewTicker(g.interval)
-	defer ticker.Stop()
-
+	when := "startup"
+	var retry time.Duration
 	for {
-		select {
-		case <-ticker.C:
-			if g.check(ctx, "periodic") {
-				return
-			}
-		case <-ctx.Done():
+		applied, err := g.check(ctx, when)
+		if applied {
 			return
 		}
+		wait := g.interval
+		if err != nil && retryable(err) {
+			retry = nextRetry(retry, base, g.interval)
+			wait = retry
+			g.log.Info("update check will be retried soon", map[string]any{"in": wait.String()})
+		} else {
+			retry = 0
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(wait):
+		}
+		when = "periodic"
 	}
 }
 
 // check runs one update check. When it installs an update it signals
 // Applied and returns true.
-func (g *GithubUpdater) check(ctx context.Context, when string) bool {
+func (g *GithubUpdater) check(ctx context.Context, when string) (bool, error) {
 	applied, err := g.CheckAndApply(ctx)
 	if err != nil {
 		g.log.Warn(when+" update check failed", map[string]any{
 			"error": err.Error(),
 		})
-		return false
+		return false, err
 	}
 	if !applied {
-		return false
+		return false, nil
 	}
 	select {
 	case g.applied <- struct{}{}:
 	default:
 	}
-	return true
+	return true, nil
 }
 
 // fetchLatestRelease queries the GitHub API for the latest release.
@@ -281,7 +296,7 @@ func (g *GithubUpdater) fetchLatestRelease(ctx context.Context) (*githubRelease,
 
 	if resp.StatusCode != http.StatusOK {
 		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("GitHub API returned %d: %s", resp.StatusCode, string(body))
+		return nil, newStatusError(resp, "GitHub API returned %d: %s", resp.StatusCode, string(body))
 	}
 
 	var release githubRelease
@@ -306,7 +321,7 @@ func (g *GithubUpdater) downloadFile(ctx context.Context, url, destPath string) 
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+		return newStatusError(resp, "download returned HTTP %d", resp.StatusCode)
 	}
 
 	f, err := os.Create(destPath)
@@ -336,7 +351,7 @@ func (g *GithubUpdater) verifyChecksum(ctx context.Context, checksumURL, filePat
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("checksum download returned HTTP %d", resp.StatusCode)
+		return newStatusError(resp, "checksum download returned HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
@@ -383,7 +398,7 @@ func (g *GithubUpdater) verifyConsolidatedChecksum(ctx context.Context, checksum
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("checksum download returned HTTP %d", resp.StatusCode)
+		return newStatusError(resp, "checksum download returned HTTP %d", resp.StatusCode)
 	}
 
 	body, err := io.ReadAll(resp.Body)
