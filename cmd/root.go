@@ -226,10 +226,33 @@ func runCycle(
 	liteMode bool,
 	log *logger.Logger,
 ) bool {
+	ok, messages := syncOnce(ctx, cfg, collector, snd, stateMgr, healthState, liteMode, log)
+	if messages >= largeCycleMessages {
+		// A backfill decodes gigabytes of JSON. syncOnce has returned, so
+		// that data is unreachable now; hand it back rather than holding it
+		// for the life of a background agent, on failure as well.
+		debug.FreeOSMemory()
+	}
+	return ok
+}
+
+// syncOnce does one cycle and reports whether it was fully acknowledged and
+// how many messages it handled.
+func syncOnce(
+	ctx context.Context,
+	cfg config.Config,
+	collector *ingest.Collector,
+	snd *sender.Sender,
+	stateMgr *state.Manager,
+	healthState *health.HealthState,
+	liteMode bool,
+	log *logger.Logger,
+) (bool, int) {
 	started := time.Now()
 	cyc := collector.Collect(func(path string) int64 { return stateMgr.Get(path).ByteOffset })
+	messages := cyc.Messages()
 	healthState.SetFilesTracked(cyc.Files)
-	healthState.SetRecordsBuffered(cyc.Messages())
+	healthState.SetRecordsBuffered(messages)
 	for path, err := range cyc.ReadErrors {
 		log.Warn("failed to read session file", map[string]any{"path": path, "error": err.Error()})
 	}
@@ -255,7 +278,7 @@ func runCycle(
 				"messages": len(b.Messages),
 				"error":    err.Error(),
 			})
-			return false
+			return false, messages
 		}
 	}
 
@@ -265,26 +288,21 @@ func runCycle(
 	if len(cyc.Offsets) > 0 {
 		if err := stateMgr.Save(); err != nil {
 			log.Error("batches stored but offsets not saved; they will be re-sent", map[string]any{"error": err.Error()})
-			return false
+			return false, messages
 		}
 	}
 
 	healthState.SetLastSyncTime(time.Now())
 	healthState.SetRecordsBuffered(0)
-	if cyc.Messages() >= largeCycleMessages {
-		// A backfill decodes gigabytes of JSON; hand that memory back
-		// rather than holding it for the life of a background agent.
-		debug.FreeOSMemory()
-	}
 	if len(batches) > 0 {
 		log.Info("sync cycle complete", map[string]any{
 			"batches":     len(batches),
 			"sessions":    len(cyc.Groups),
-			"messages":    cyc.Messages(),
+			"messages":    messages,
 			"duration_ms": time.Since(started).Milliseconds(),
 		})
 	}
-	return true
+	return true, messages
 }
 
 // gracefulShutdown persists committed offsets. Offsets only ever reach the

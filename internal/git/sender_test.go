@@ -142,3 +142,36 @@ func TestNoteSessionIDReadsQuantifaiNote(t *testing.T) {
 		t.Fatalf("malformed note must not link, got %q", id)
 	}
 }
+
+func TestRepoPathResolvesMainCheckoutFromWorktree(t *testing.T) {
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not installed")
+	}
+	main, _ := filepath.EvalSymlinks(t.TempDir())
+	main = filepath.Join(main, "myrepo")
+	git := func(dir string, args ...string) {
+		cmd := exec.Command("git", append([]string{"-C", dir}, args...)...)
+		cmd.Env = append(os.Environ(), "GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t", "GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t")
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("git %v: %v %s", args, err, out)
+		}
+	}
+	os.MkdirAll(main, 0o755)
+	git(main, "init", "-q")
+	git(main, "commit", "-q", "--allow-empty", "-m", "c1")
+	wt := filepath.Join(main, ".worktrees", "feature-x")
+	git(main, "worktree", "add", "-q", wt, "-b", "feature-x")
+
+	for _, dir := range []string{main, wt, filepath.Join(wt)} {
+		prev, _ := os.Getwd()
+		os.Chdir(dir)
+		got := repoPath()
+		os.Chdir(prev)
+		if got != main {
+			t.Fatalf("from %s: got %q, want %q", dir, got, main)
+		}
+	}
+	if g := toGitEvent(&CommitEvent{CommitSHA: "a", RepoPath: main}, false); g.Repo != "myrepo" {
+		t.Fatalf("repo name %q", g.Repo)
+	}
+}

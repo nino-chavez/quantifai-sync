@@ -8,6 +8,7 @@ import (
 	"crypto/sha256"
 	"fmt"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -80,8 +81,8 @@ func CaptureCommit() (*CommitEvent, error) {
 	h := sha256.Sum256([]byte(body))
 	ev.CommitMessageHash = fmt.Sprintf("%x", h)
 
-	// repository top level and subject line, for the server's gitEvents
-	ev.RepoPath, _ = gitOutput("rev-parse", "--show-toplevel")
+	// repository path and subject line, for the server's gitEvents
+	ev.RepoPath = repoPath()
 	ev.Subject, _ = gitOutput("log", "-1", "--format=%s")
 
 	// remote URL (best effort -- may be empty for local-only repos)
@@ -112,6 +113,20 @@ func CaptureCommit() (*CommitEvent, error) {
 	ev.MergeCommit = len(strings.Fields(parents)) > 1
 
 	return ev, nil
+}
+
+// repoPath returns the main checkout's top level, even from a linked
+// worktree. The server keys git_events on (repo, commit_sha) with repo the
+// last path segment, and the git importer reads the main checkout, so a
+// commit made in <repo>/.worktrees/<branch> must still report <repo> or the
+// same commit lands twice under two names.
+func repoPath() string {
+	common, err := gitOutput("rev-parse", "--path-format=absolute", "--git-common-dir")
+	if err == nil && filepath.Base(common) == ".git" {
+		return filepath.Dir(common)
+	}
+	top, _ := gitOutput("rev-parse", "--show-toplevel")
+	return top
 }
 
 // gitOutput runs a git command and returns its trimmed stdout.
