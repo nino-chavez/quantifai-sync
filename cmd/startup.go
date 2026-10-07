@@ -104,6 +104,7 @@ func (w *waitingHealth) report(err error) {
 		go w.srv.ListenAndServe()
 	}
 	w.state.SetProblem(err.Error())
+	notifyStatus("Waiting: " + err.Error())
 }
 
 // stop shuts the server down so the agent's own can take the port.
