@@ -232,6 +232,19 @@ func runAgent() int {
 
 		case <-u.Applied():
 			// Reached only between cycles, so no sync is cut off.
+			if handoff := os.Getenv(handoffEnv); handoff != "" {
+				// Under a supervisor (the Windows logon task): hand over the
+				// installed release and exit so it starts the new binary.
+				log.Info("update installed, exiting so the supervisor starts the new binary", nil)
+				cancel()
+				if code := gracefulShutdown(stateMgr, log); code != 0 {
+					return code
+				}
+				if err := os.WriteFile(handoff, []byte(os.Getenv(updater.UpdatedToEnv)), 0600); err != nil {
+					log.Warn("could not hand the installed release to the supervisor", map[string]any{"error": err.Error()})
+				}
+				return exitUpdated
+			}
 			if !restartsInPlace {
 				log.Info("update installed; it takes effect when the agent next starts", nil)
 				continue
