@@ -166,6 +166,7 @@ func fakeRelease(t *testing.T) (*GithubUpdater, string, *atomic.Int32) {
 // find the archive, verify its .sha256, extract the binary, replace the
 // executable, and do not re-apply the same release on the next check.
 func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
+	t.Setenv(updatedToEnv, "")
 	g, exe, downloads := fakeRelease(t)
 
 	applied, err := g.CheckAndApply(context.Background())
@@ -183,11 +184,33 @@ func TestCheckAndApplyInstallsFromReleaseArchive(t *testing.T) {
 	if n := downloads.Load(); n != 1 {
 		t.Fatalf("archive downloaded %d times, want 1", n)
 	}
+	if got := os.Getenv(updatedToEnv); got != "v9.9.9" {
+		t.Fatalf("%s = %q after the update, want v9.9.9 for the restarted process", updatedToEnv, got)
+	}
+}
+
+// After a restart into a release whose binary still reports an older
+// version, the updater must not install that release again.
+func TestCheckAndApplyRefusesReleaseJustInstalled(t *testing.T) {
+	t.Setenv(updatedToEnv, "v9.9.9")
+	g, exe, downloads := fakeRelease(t)
+
+	applied, err := g.CheckAndApply(context.Background())
+	if applied || err == nil || !strings.Contains(err.Error(), "just installed") {
+		t.Fatalf("CheckAndApply = %v, %v; want false and a just-installed error", applied, err)
+	}
+	if n := downloads.Load(); n != 0 {
+		t.Fatalf("archive downloaded %d times, want 0", n)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "old binary" {
+		t.Fatalf("executable changed to %q", got)
+	}
 }
 
 // Run installs the update, signals Applied once, and stops, so the caller
 // can restart into the new binary.
 func TestRunSignalsAppliedAndStops(t *testing.T) {
+	t.Setenv(updatedToEnv, "")
 	g, exe, downloads := fakeRelease(t)
 
 	ctx, cancel := context.WithCancel(context.Background())
