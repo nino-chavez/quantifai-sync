@@ -16,7 +16,7 @@ func TestTaskXMLSettings(t *testing.T) {
       <LogonType>InteractiveToken</LogonType>
       <RunLevel>LeastPrivilege</RunLevel>`,
 		`<Command>C:\Users\ana\bin\quantifai-sync.exe</Command>`,
-		`<Arguments>run --no-console</Arguments>`,
+		`<Arguments>run --no-console --supervise</Arguments>`,
 		`<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>`,
 		`<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
 		`<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
