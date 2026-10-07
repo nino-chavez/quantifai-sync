@@ -64,7 +64,7 @@ func TestTaskRegistersWithLongRunningSettings(t *testing.T) {
 		"<DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>",
 		"<StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>",
 		"<LogonType>InteractiveToken</LogonType>",
-		"<MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>",
+		"<MultipleInstancesPolicy>StopExisting</MultipleInstancesPolicy>",
 		"<LogonTrigger>",
 		"<Command>" + bin + "</Command>",
 		"<Arguments>run --no-console</Arguments>",
@@ -113,6 +113,41 @@ func TestTaskRunsAsInstallingUser(t *testing.T) {
 	}
 	info, _ := exec.Command("schtasks", "/query", "/tn", w.taskName, "/v", "/fo", "list").CombinedOutput()
 	t.Skipf("task did not run within 20s; scheduler state:\n%s", info)
+}
+
+// A second /run, as a reinstall does, must replace the running instance
+// rather than be dropped, whatever language schtasks reports status in.
+func TestTaskRunReplacesRunningInstance(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "starts.txt")
+	w := testTask(t, `C:\Windows\System32\cmd.exe`, fmt.Sprintf(`/c echo start>> "%s" & ping -n 60 127.0.0.1 > nul`, marker))
+	starts := func() int {
+		b, _ := os.ReadFile(marker)
+		return strings.Count(string(b), "start")
+	}
+	waitFor := func(n int) bool {
+		for i := 0; i < 40; i++ {
+			if starts() >= n {
+				return true
+			}
+			time.Sleep(250 * time.Millisecond)
+		}
+		return false
+	}
+	run := func() {
+		if out, err := exec.Command("schtasks", "/run", "/tn", w.taskName).CombinedOutput(); err != nil {
+			t.Fatalf("schtasks /run: %s: %v", out, err)
+		}
+	}
+
+	run()
+	if !waitFor(1) {
+		t.Skip("task did not run; no interactive session here")
+	}
+	run()
+	if !waitFor(2) {
+		t.Fatalf("second /run while the first instance ran: %d start(s), want 2", starts())
+	}
+	t.Logf("second /run started a new instance: %d starts", starts())
 }
 
 func TestSessionUserMatchesProcessUser(t *testing.T) {
