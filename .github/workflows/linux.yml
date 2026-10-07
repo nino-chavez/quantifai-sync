@@ -26,8 +26,9 @@ jobs:
       - name: systemd status line
         run: |
           sudo loginctl enable-linger "$USER"
-          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
-          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          export XDG_RUNTIME_DIR
+          for _ in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
           export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
           qs="$RUNNER_TEMP/qs"
           mkdir -p "$qs/watch" ~/.config/quantifai
@@ -36,7 +37,7 @@ jobs:
           "$qs/quantifai-sync" install
           status() { systemctl --user show -p StatusText --value quantifai-sync; }
           s=""
-          for i in $(seq 1 20); do s="$(status)"; [ -n "$s" ] && break; sleep 1; done
+          for _ in $(seq 1 20); do s="$(status)"; [ -n "$s" ] && break; sleep 1; done
           echo "while waiting: $s"
           case "$s" in
             "Waiting: no API key"*) ;;
@@ -44,7 +45,7 @@ jobs:
                echo "::error::want a 'Waiting: no API key' status, got: '$s'"; exit 1 ;;
           esac
           echo "api_key = 'ci-not-a-real-key'" >> ~/.config/quantifai/config.toml
-          for i in $(seq 1 45); do s="$(status)"; [ "$s" = Syncing ] && break; sleep 1; done
+          for _ in $(seq 1 45); do s="$(status)"; [ "$s" = Syncing ] && break; sleep 1; done
           echo "after the key: $s"
           systemctl --user status quantifai-sync --no-pager | head -8 || true
           "$qs/quantifai-sync" uninstall

@@ -30,6 +30,7 @@ Type=simple
 ExecStart=%s run
 Restart=on-failure
 RestartSec=10
+NotifyAccess=main
 
 [Install]
 WantedBy=default.target

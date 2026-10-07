@@ -103,6 +103,7 @@ func TestSystemdGeneratesCorrectUnitFile(t *testing.T) {
 		"Type=simple",
 		"Restart=on-failure",
 		"RestartSec=10",
+		"NotifyAccess=main",
 		"WantedBy=default.target",
 	}
 	for _, prop := range requiredProperties {
