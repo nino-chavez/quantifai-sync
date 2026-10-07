@@ -20,6 +20,10 @@ import (
 	"github.com/quantifai/sync/internal/logger"
 )
 
+// updatedToEnv names the release this process just installed. The restart
+// after an update keeps the environment, so the new process sees it.
+const updatedToEnv = "QUANTIFAI_UPDATED_TO"
+
 // GithubUpdater checks GitHub Releases for newer versions and performs
 // atomic binary replacement when an update is found.
 type GithubUpdater struct {
@@ -32,6 +36,9 @@ type GithubUpdater struct {
 
 	// executable locates the binary to replace; nil means os.Executable.
 	executable func() (string, error)
+
+	// applied is signalled once Run installs an update.
+	applied chan struct{}
 }
 
 // githubRelease is the subset of the GitHub Releases API response we need.
@@ -56,7 +63,13 @@ func NewGithubUpdater(version, updateChannel, repo string, interval time.Duratio
 		repo:          repo,
 		interval:      interval,
 		client:        &http.Client{Timeout: 30 * time.Second},
+		applied:       make(chan struct{}, 1),
 	}
+}
+
+// Applied receives once when Run has installed an update.
+func (g *GithubUpdater) Applied() <-chan struct{} {
+	return g.applied
 }
 
 // CheckAndApply checks GitHub for a newer release. If found, it downloads
@@ -83,6 +96,13 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 			"latest":  latestVersion,
 		})
 		return false, nil
+	}
+
+	// A release whose binary reports a version older than its tag (an
+	// unstamped build, or one built before tagging) would otherwise be
+	// installed again after every restart.
+	if os.Getenv(updatedToEnv) == release.TagName {
+		return false, fmt.Errorf("release %s was just installed but this binary reports %s; not installing it again (check the release binary's version stamp)", release.TagName, g.version)
 	}
 
 	g.log.Info("update available", map[string]any{
@@ -188,6 +208,7 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	// The running process is still the old binary until it restarts; record
 	// the installed version so later checks do not re-apply the same release.
 	g.version = release.TagName
+	os.Setenv(updatedToEnv, release.TagName)
 
 	g.log.Info("update applied successfully", map[string]any{
 		"from": currentVersion,
@@ -198,12 +219,11 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 }
 
 // Run starts the background update loop. It checks on startup, then
-// every interval. Blocks until ctx is cancelled.
+// every interval. Blocks until ctx is cancelled, or returns once an update
+// is installed, after signalling Applied.
 func (g *GithubUpdater) Run(ctx context.Context) {
-	if _, err := g.CheckAndApply(ctx); err != nil {
-		g.log.Warn("startup update check failed", map[string]any{
-			"error": err.Error(),
-		})
+	if g.check(ctx, "startup") {
+		return
 	}
 
 	ticker := time.NewTicker(g.interval)
@@ -212,15 +232,33 @@ func (g *GithubUpdater) Run(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			if _, err := g.CheckAndApply(ctx); err != nil {
-				g.log.Warn("periodic update check failed", map[string]any{
-					"error": err.Error(),
-				})
+			if g.check(ctx, "periodic") {
+				return
 			}
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// check runs one update check. When it installs an update it signals
+// Applied and returns true.
+func (g *GithubUpdater) check(ctx context.Context, when string) bool {
+	applied, err := g.CheckAndApply(ctx)
+	if err != nil {
+		g.log.Warn(when+" update check failed", map[string]any{
+			"error": err.Error(),
+		})
+		return false
+	}
+	if !applied {
+		return false
+	}
+	select {
+	case g.applied <- struct{}{}:
+	default:
+	}
+	return true
 }
 
 // fetchLatestRelease queries the GitHub API for the latest release.

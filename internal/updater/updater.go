@@ -19,13 +19,18 @@ const defaultCheckInterval = 24 * time.Hour
 // Implementations must be safe for concurrent use.
 type Updater interface {
 	// CheckAndApply checks for a newer version and applies it if found.
-	// It returns true if an update was applied (the caller should expect
-	// the service manager to restart the process).
+	// It returns true if an update was applied. The running process is
+	// still the old binary until it restarts.
 	CheckAndApply(ctx context.Context) (applied bool, err error)
 
 	// Run starts the background update loop.  It checks immediately on
-	// start, then periodically.  It blocks until ctx is cancelled.
+	// start, then periodically.  It blocks until ctx is cancelled, or
+	// returns after applying an update.
 	Run(ctx context.Context)
+
+	// Applied receives once when Run has installed an update, so the
+	// caller can restart into the new binary. Nil when updates are off.
+	Applied() <-chan struct{}
 }
 
 // NoopUpdater is returned when auto_update is false.  It never checks
@@ -39,6 +44,9 @@ func (n *NoopUpdater) CheckAndApply(_ context.Context) (bool, error) {
 
 // Run returns immediately because auto-update is disabled.
 func (n *NoopUpdater) Run(_ context.Context) {}
+
+// Applied returns nil: a receive from it never fires.
+func (n *NoopUpdater) Applied() <-chan struct{} { return nil }
 
 // NewUpdater returns the appropriate Updater implementation based on
 // the autoUpdate flag.  When disabled, a NoopUpdater is returned.
