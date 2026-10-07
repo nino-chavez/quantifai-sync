@@ -183,6 +183,7 @@ func runAgent() int {
 	log.Info("editor events stay in the local queue: the server has no editor-events endpoint", nil)
 
 	healthState.SetStatus(health.StatusOK)
+	notifyStatus("Syncing")
 
 	// Run first cycle immediately (it also reads every file once to rebuild
 	// session totals in memory), then one cycle per scan interval.

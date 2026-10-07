@@ -1,0 +1,51 @@
+# Linux: the full test suite, and the agent under a real systemd user
+# manager (its status line in `systemctl status`).
+name: linux
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: Test
+        run: go test -count=1 ./...
+      # Install with no API key: systemd's status line must name the
+      # problem, then read "Syncing" once a key is in config.toml.
+      # api_url points at a closed port, so nothing is sent anywhere.
+      - name: systemd status line
+        run: |
+          sudo loginctl enable-linger "$USER"
+          export XDG_RUNTIME_DIR="/run/user/$(id -u)"
+          for i in $(seq 1 30); do [ -S "$XDG_RUNTIME_DIR/bus" ] && break; sleep 1; done
+          export DBUS_SESSION_BUS_ADDRESS="unix:path=$XDG_RUNTIME_DIR/bus"
+          qs="$RUNNER_TEMP/qs"
+          mkdir -p "$qs/watch" ~/.config/quantifai
+          go build -o "$qs/quantifai-sync" .
+          printf "api_url = 'http://127.0.0.1:9'\nwatch_dir = '%s/watch'\n" "$qs" > ~/.config/quantifai/config.toml
+          "$qs/quantifai-sync" install
+          status() { systemctl --user show -p StatusText --value quantifai-sync; }
+          s=""
+          for i in $(seq 1 20); do s="$(status)"; [ -n "$s" ] && break; sleep 1; done
+          echo "while waiting: $s"
+          case "$s" in
+            "Waiting: no API key"*) ;;
+            *) systemctl --user status quantifai-sync --no-pager || true
+               echo "::error::want a 'Waiting: no API key' status, got: '$s'"; exit 1 ;;
+          esac
+          echo "api_key = 'ci-not-a-real-key'" >> ~/.config/quantifai/config.toml
+          for i in $(seq 1 45); do s="$(status)"; [ "$s" = Syncing ] && break; sleep 1; done
+          echo "after the key: $s"
+          systemctl --user status quantifai-sync --no-pager | head -8 || true
+          "$qs/quantifai-sync" uninstall
+          [ "$s" = Syncing ] || { echo "::error::want 'Syncing', got: '$s'"; exit 1; }

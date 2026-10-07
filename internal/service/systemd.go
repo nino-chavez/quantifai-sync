@@ -16,7 +16,9 @@ const (
 
 // unitTemplate is the systemd user unit file content.  Properties match
 // the spec: Type=simple, Restart=on-failure, RestartSec=10,
-// WantedBy=default.target.  The ExecStart binary path (%s) is resolved
+// WantedBy=default.target.  NotifyAccess=main lets the agent set the
+// status line `systemctl status` shows (see cmd/notify.go); without it
+// systemd ignores every status message from a Type=simple service.  The ExecStart binary path (%s) is resolved
 // dynamically at install time via os.Executable().
 const unitTemplate = `[Unit]
 Description=Quantifai Sync Agent
