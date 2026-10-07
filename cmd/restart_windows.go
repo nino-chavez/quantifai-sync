@@ -5,8 +5,7 @@ package cmd
 import "errors"
 
 // restartsInPlace reports whether restartInPlace is supported here.
-// Windows has no exec, and the agent does not yet run as a real Windows
-// service that could be restarted, so an update waits for the next start.
+// Windows has no exec, so an update waits for the logon task's next start.
 const restartsInPlace = false
 
 func restartInPlace() error {

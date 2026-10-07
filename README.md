@@ -18,13 +18,19 @@ The explicit URL is required: Homebrew's short `brew tap user/name` form looks f
 called `homebrew-name`, and the tap lives at `quantifai-homebrew-tap`.
 
 Or grab a binary from [releases](https://github.com/nino-chavez/quantifai-sync/releases)
-— darwin and linux, arm64 and amd64.
+— darwin and linux, arm64 and amd64, and windows amd64.
 
 ```bash
 quantifai-sync install      # set up the background service
 quantifai-sync healthcheck  # verify it's reading and sending
 quantifai-sync uninstall
 ```
+
+On Windows, `install` registers a Task Scheduler task that starts the agent at logon, as the
+user who ran `install`, and stores the API key in that user's Credential Manager. Run it from
+an ordinary prompt, not an elevated one: no administrator rights are needed, and elevating with
+another account's credentials would install the agent for that account. It prints the account
+it registered.
 
 ## What it does
 

@@ -20,5 +20,45 @@ jobs:
           go-version-file: go.mod
       - name: Build
         run: go build ./...
-      - name: Test file lock, commit queue, path naming and updater
-        run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/
+      - name: Test file lock, commit queue, path naming, updater and logon task
+        run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
+      - name: Logon task (verbose, shows whether the task could run here)
+        run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
+      # End to end on the runner (never in `go test`, which a developer runs on
+      # their own machine): install registers the QuantifaiSync logon task and
+      # stores the key in Credential Manager; the agent must start as this user,
+      # read that key, and answer /health; uninstall must remove the task.
+      # api_url points at a closed port, so nothing is sent anywhere.
+      - name: Install, run and uninstall the agent as a logon task
+        shell: pwsh
+        run: |
+          $qs = Join-Path $env:RUNNER_TEMP 'qs'
+          $exe = Join-Path $qs 'quantifai-sync.exe'
+          New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
+          go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.0.0-ci" -o $exe .
+          $fwd = $qs -replace '\\', '/'
+          Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
+            "api_url = 'http://127.0.0.1:9'",
+            "watch_dir = '$fwd/watch'",
+            "log_file = '$fwd/agent.log'"
+          )
+          & $exe install --api-key ci-not-a-real-key
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $health = $null
+          foreach ($i in 1..30) {
+            try { $health = Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2; break } catch { Start-Sleep 1 }
+          }
+          schtasks /query /tn QuantifaiSync /v /fo list | Select-String 'Status:|Last Result|Run As User|Logon Mode'
+          if (-not $health) {
+            if (Test-Path "$qs\agent.log") { Get-Content "$qs\agent.log" }
+            Write-Error 'agent started by the logon task did not answer /health'; exit 1
+          }
+          $health | ConvertTo-Json -Compress
+          if ($health.version -ne 'v0.0.0-ci') { Write-Error "unexpected version $($health.version)"; exit 1 }
+          & $exe uninstall
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          schtasks /query /tn QuantifaiSync *> $null
+          if ($LASTEXITCODE -eq 0) { Write-Error 'task still registered after uninstall'; exit 1 }
+          Start-Sleep 2
+          try { Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 | Out-Null; Write-Error 'agent still running after uninstall'; exit 1 } catch { 'agent stopped' }
+          exit 0
