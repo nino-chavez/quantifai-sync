@@ -6,8 +6,13 @@ import (
 	"fmt"
 	"io"
 	"os"
-	"strings"
+	"path/filepath"
+	"regexp"
+	"time"
 )
+
+// oldSuffix matches the names replaceExecutable moves a binary aside to.
+var oldSuffix = regexp.MustCompile(`\.old(-\d+)?$`)
 
 // replaceExecutable installs src as the executable at dst. Windows will not
 // overwrite or delete a running .exe, but it will rename one. So the new
@@ -15,21 +20,30 @@ import (
 // is moved into place; if that last step fails, dst.old is moved back. This
 // is minio/selfupdate's CommitBinary sequence.
 //
-// The running process keeps dst.old open, so it stays until the next update
-// removes it. While that process still runs, a second update fails cleanly:
-// dst.old cannot be replaced, and dst is left as it was.
+// A process still running an earlier binary (the supervisor, which keeps
+// running until the next logon) holds that file open, so it cannot be
+// removed or replaced. Each update therefore moves dst aside under a name
+// no running process holds, and removes every leftover it can.
 func replaceExecutable(src, dst string) error {
 	// After a swap the running process may report its own path as dst.old.
-	dst = strings.TrimSuffix(dst, ".old")
+	dst = oldSuffix.ReplaceAllString(dst, "")
 	newPath := dst + ".new"
-	oldPath := dst + ".old"
 
 	// Stage beside dst so both renames stay on one volume.
 	if err := copyExecutable(src, newPath); err != nil {
 		os.Remove(newPath)
 		return fmt.Errorf("stage new binary: %w", err)
 	}
-	os.Remove(oldPath) // left by the previous update; fails only if still running
+	// Left by earlier updates; those still running stay.
+	if leftovers, _ := filepath.Glob(dst + ".old*"); leftovers != nil {
+		for _, f := range leftovers {
+			os.Remove(f)
+		}
+	}
+	oldPath := dst + ".old"
+	if _, err := os.Lstat(oldPath); err == nil {
+		oldPath = fmt.Sprintf("%s.old-%d", dst, time.Now().UnixNano())
+	}
 
 	if err := os.Rename(dst, oldPath); err != nil {
 		os.Remove(newPath)

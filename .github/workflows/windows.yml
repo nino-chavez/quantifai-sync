@@ -84,3 +84,49 @@ jobs:
           if ($left) { $left | Format-Table Id, StartTime; Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
           'no quantifai-sync processes left'
           exit 0
+      # Self-update end to end: an agent stamped v0.2.9-ci, installed as the
+      # logon task with auto-update on, must find the real latest release,
+      # replace its own running file, exit to the supervisor, and come back
+      # as that release. The release's own uninstall predates the logon
+      # task, so cleanup uses this commit's build from the previous step.
+      - name: Self-update under the logon task
+        shell: pwsh
+        run: |
+          $qs = Join-Path $env:RUNNER_TEMP 'qsu'
+          $exe = Join-Path $qs 'quantifai-sync.exe'
+          $tool = Join-Path $env:RUNNER_TEMP 'qs\quantifai-sync.exe'
+          New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
+          go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.2.9-ci" -o $exe .
+          $latest = (Invoke-RestMethod https://api.github.com/repos/nino-chavez/quantifai-sync/releases/latest).tag_name
+          "latest release: $latest"
+          $fwd = $qs -replace '\\', '/'
+          Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
+            "api_url = 'http://127.0.0.1:9'",
+            "watch_dir = '$fwd/watch'",
+            "log_file = '$fwd/agent.log'",
+            "auto_update = true",
+            "update_repo = 'nino-chavez/quantifai-sync'"
+          )
+          & $exe install --api-key ci-not-a-real-key
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          $versions = @()
+          foreach ($i in 1..120) {
+            try {
+              $v = (Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2).version
+              if ($versions[-1] -ne $v) { $versions += $v; "health reports $v" }
+              if ($v -eq $latest) { break }
+            } catch { }
+            Start-Sleep 1
+          }
+          Get-Content "$qs\agent.log" | Select-String 'update|supervisor|starting quantifai'
+          Get-ChildItem $qs -Filter 'quantifai-sync.exe*' | Format-Table Name, Length -AutoSize | Out-String
+          & $tool uninstall
+          Start-Sleep 2
+          $left = Get-Process quantifai-sync -ErrorAction SilentlyContinue
+          if ($versions[-1] -ne $latest) { Write-Error "agent did not come back as $latest (saw: $($versions -join ', '))"; exit 1 }
+          $log = Get-Content "$qs\agent.log" -Raw
+          if ($log -notmatch '"version":"v0.2.9-ci"') { Write-Error 'agent never started as v0.2.9-ci'; exit 1 }
+          if ($log -notmatch 'exiting so the supervisor starts the new binary') { Write-Error 'agent did not hand over to the supervisor'; exit 1 }
+          if ($left) { $left | Format-Table Id, StartTime; Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
+          "updated from v0.2.9-ci to $latest under the supervisor; nothing left running"
+          exit 0

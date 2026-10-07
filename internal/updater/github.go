@@ -20,9 +20,10 @@ import (
 	"github.com/quantifai/sync/internal/logger"
 )
 
-// updatedToEnv names the release this process just installed. The restart
-// after an update keeps the environment, so the new process sees it.
-const updatedToEnv = "QUANTIFAI_UPDATED_TO"
+// UpdatedToEnv names the release this process just installed. The restart
+// after an update keeps the environment (exec on macOS and Linux; the
+// supervisor passes it on Windows), so the new process sees it.
+const UpdatedToEnv = "QUANTIFAI_UPDATED_TO"
 
 // GithubUpdater checks GitHub Releases for newer versions and performs
 // atomic binary replacement when an update is found.
@@ -101,7 +102,7 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	// A release whose binary reports a version older than its tag (an
 	// unstamped build, or one built before tagging) would otherwise be
 	// installed again after every restart.
-	if os.Getenv(updatedToEnv) == release.TagName {
+	if os.Getenv(UpdatedToEnv) == release.TagName {
 		return false, fmt.Errorf("release %s was just installed but this binary reports %s; not installing it again (check the release binary's version stamp)", release.TagName, g.version)
 	}
 
@@ -208,7 +209,7 @@ func (g *GithubUpdater) CheckAndApply(ctx context.Context) (bool, error) {
 	// The running process is still the old binary until it restarts; record
 	// the installed version so later checks do not re-apply the same release.
 	g.version = release.TagName
-	os.Setenv(updatedToEnv, release.TagName)
+	os.Setenv(UpdatedToEnv, release.TagName)
 
 	g.log.Info("update applied successfully", map[string]any{
 		"from": currentVersion,

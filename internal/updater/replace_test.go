@@ -68,43 +68,41 @@ func TestReplaceExecutableWhileRunning(t *testing.T) {
 		t.Fatalf("executable holds %d bytes, want the new binary", len(got))
 	}
 
-	newer := filepath.Join(t.TempDir(), "newer")
-	if err := os.WriteFile(newer, []byte("newer binary"), 0755); err != nil {
-		t.Fatal(err)
+	write := func(name, body string) string {
+		p := filepath.Join(t.TempDir(), name)
+		if err := os.WriteFile(p, []byte(body), 0755); err != nil {
+			t.Fatal(err)
+		}
+		return p
 	}
 
-	if runtime.GOOS == "windows" {
-		// While the old process still runs, its .old file cannot be replaced:
-		// a second update must fail and leave the installed binary alone.
-		if err := replaceExecutable(newer, exe); err == nil {
-			t.Fatal("second replace while the old process runs: want an error")
-		}
-		if got, _ := os.ReadFile(exe); string(got) != "new binary" {
-			t.Fatalf("failed replace changed the executable to %q", got)
-		}
-		if _, err := os.Stat(exe + ".new"); !os.IsNotExist(err) {
-			t.Error("failed replace left the staged .new file")
-		}
+	// A second update while the first old process still runs, as when the
+	// supervisor keeps running from an earlier binary. On Windows that
+	// process holds the .old file, so the update must pick another name.
+	if err := replaceExecutable(write("newer", "newer binary"), exe); err != nil {
+		t.Fatalf("second replace while the old process runs: %v", err)
+	}
+	if got, _ := os.ReadFile(exe); string(got) != "newer binary" {
+		t.Fatalf("second replace left %q", got)
 	}
 
-	// Once the old process has exited, the next update replaces again and
-	// clears what the first one left behind. On Windows, pass the path the
-	// old process may report after the swap, which ends in .old.
+	// Once the old process has exited, the next update clears everything
+	// earlier ones left. On Windows, pass the path the old process may
+	// report after the swap, which ends in .old.
 	stop()
 	target := exe
 	if runtime.GOOS == "windows" {
 		target = exe + ".old"
 	}
-	if err := replaceExecutable(newer, target); err != nil {
-		t.Fatalf("second replace: %v", err)
+	if err := replaceExecutable(write("newest", "newest binary"), target); err != nil {
+		t.Fatalf("third replace: %v", err)
 	}
-	if got, _ := os.ReadFile(exe); string(got) != "newer binary" {
-		t.Fatalf("second replace left %q", got)
+	if got, _ := os.ReadFile(exe); string(got) != "newest binary" {
+		t.Fatalf("third replace left %q", got)
 	}
-	for _, leftover := range []string{exe + ".old", exe + ".new"} {
-		if _, err := os.Stat(leftover); !os.IsNotExist(err) {
-			t.Errorf("%s left behind after the old process exited", filepath.Base(leftover))
-		}
+	leftovers, _ := filepath.Glob(exe + ".*")
+	if len(leftovers) != 0 {
+		t.Errorf("left behind after the old process exited: %v", leftovers)
 	}
 }
 
