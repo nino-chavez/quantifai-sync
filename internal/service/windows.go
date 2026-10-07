@@ -9,6 +9,7 @@ import (
 	"os/user"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode/utf16"
 	"unsafe"
 
@@ -73,13 +74,23 @@ func (w *Windows) Install() error {
 		return err
 	}
 	fmt.Printf("registered logon task %s for %s\n", w.taskName, w.user)
-	// A running instance would make /run a no-op (IgnoreNew); stop it so the
-	// new definition takes effect now.
+	// A running instance would make /run a no-op (IgnoreNew); stop it and
+	// wait until Task Scheduler no longer reports it running, so the new
+	// definition takes effect now.
 	exec.Command("schtasks", "/end", "/tn", w.taskName).CombinedOutput()
+	for i := 0; i < 20 && w.running(); i++ {
+		time.Sleep(500 * time.Millisecond)
+	}
 	if out, err := exec.Command("schtasks", "/run", "/tn", w.taskName).CombinedOutput(); err != nil {
 		return fmt.Errorf("service: schtasks /run: %s: %w", out, err)
 	}
 	return nil
+}
+
+// running reports whether Task Scheduler shows the task as running.
+func (w *Windows) running() bool {
+	out, err := exec.Command("schtasks", "/query", "/tn", w.taskName, "/fo", "csv", "/nh").Output()
+	return err == nil && strings.Contains(string(out), `"Running"`)
 }
 
 // register writes the task definition and creates (or replaces) the task.

@@ -62,3 +62,32 @@ jobs:
           Start-Sleep 2
           try { Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 | Out-Null; Write-Error 'agent still running after uninstall'; exit 1 } catch { 'agent stopped' }
           exit 0
+      # MEASUREMENT (temporary): can a standard, non-admin user register a
+      # logon task for themselves? Decides whether install needs elevation.
+      - name: "Measure: standard user registers own logon task"
+        shell: pwsh
+        run: |
+          $name = 'qsstd'
+          $pw = 'Q' + [guid]::NewGuid().ToString('N').Substring(0, 20) + '!a1'
+          $sec = ConvertTo-SecureString $pw -AsPlainText -Force
+          New-LocalUser -Name $name -Password $sec -AccountNeverExpires | Out-Null
+          "admin group members:"; (Get-LocalGroupMember Administrators).Name
+          $cred = New-Object System.Management.Automation.PSCredential("$env:COMPUTERNAME\$name", $sec)
+          $dir = Join-Path $env:RUNNER_TEMP 'std'
+          New-Item -ItemType Directory -Force $dir | Out-Null
+          icacls $dir /grant "${name}:(OI)(CI)F" | Out-Null
+          $xml = (Get-Content internal/service/task.go -Raw) -replace '(?s).*const taskTemplate = `', '' -replace '(?s)`\s*\n// taskArguments.*', ''
+          $user = "$env:COMPUTERNAME\$name"
+          $script:i = 0
+          $xml = [regex]::Replace($xml, '%s', { param($m) $script:i++; @($user, $user, 'C:\Windows\System32\cmd.exe', '/c exit 0')[$script:i - 1] })
+          [IO.File]::WriteAllText("$dir\task.xml", $xml, [Text.Encoding]::Unicode)
+          $script = "schtasks /create /tn QsStdTest /xml `"$dir\task.xml`" /f > `"$dir\out.txt`" 2>&1; `$LASTEXITCODE | Out-File `"$dir\code.txt`""
+          Set-Content "$dir\run.ps1" $script
+          $p = Start-Process pwsh -Credential $cred -ArgumentList '-NoProfile', '-File', "$dir\run.ps1" -Wait -PassThru -WorkingDirectory $dir
+          "process exit: $($p.ExitCode)"
+          "schtasks exit: $(Get-Content $dir\code.txt -ErrorAction SilentlyContinue)"
+          "schtasks output:"; Get-Content $dir\out.txt -ErrorAction SilentlyContinue
+          schtasks /query /tn QsStdTest /v /fo list 2>&1 | Select-String 'TaskName|Run As User|Logon Mode'
+          schtasks /delete /tn QsStdTest /f 2>&1 | Out-Null
+          Remove-LocalUser -Name $name
+          exit 0
