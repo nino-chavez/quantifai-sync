@@ -127,6 +127,56 @@ jobs:
           if ($left) { $left | Format-Table Id, StartTime; Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
           'no quantifai-sync processes left'
           exit 0
+      # Reinstall over a running agent, as a user upgrading by hand: a new
+      # release's exe, unpacked to a new folder, runs install. The running
+      # exe is locked, so the new one cannot be copied over it in place.
+      # install re-points the task and /run replaces the running instance
+      # (StopExisting); the supervisor's job object must take the old agent
+      # down with it, or the old agent keeps the health port and the old
+      # version keeps serving.
+      - name: Reinstall over a running agent
+        shell: pwsh
+        run: |
+          $qs = Join-Path $env:RUNNER_TEMP 'qsr'
+          $old = Join-Path $qs 'old\quantifai-sync.exe'
+          $new = Join-Path $qs 'new\quantifai-sync.exe'
+          New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
+          go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.0.1-old" -o $old .
+          go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.0.2-new" -o $new .
+          $fwd = $qs -replace '\\', '/'
+          Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
+            "api_url = 'http://127.0.0.1:9'",
+            "watch_dir = '$fwd/watch'",
+            "log_file = '$fwd/agent.log'"
+          )
+          function Version { try { (Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 -SkipHttpErrorCheck).version } catch { '' } }
+          function WaitVersion($want) { foreach ($i in 1..30) { if ((Version) -eq $want) { return $true }; Start-Sleep 1 }; return $false }
+          function Procs { Get-CimInstance Win32_Process -Filter "Name='quantifai-sync.exe'" | Select-Object ProcessId, ParentProcessId, ExecutablePath }
+          & $old install --api-key ci-not-a-real-key
+          if ($LASTEXITCODE -ne 0) { exit 1 }
+          if (-not (WaitVersion 'v0.0.1-old')) { Write-Error "old agent did not start (health: '$(Version)')"; exit 1 }
+          $before = @(Procs)
+          'before reinstall:'; $before | Format-Table -AutoSize | Out-String -Width 300
+          & $new install
+          $rc = $LASTEXITCODE
+          $ok = WaitVersion 'v0.0.2-new'
+          $seen = Version
+          Start-Sleep 2
+          $after = @(Procs)
+          'after reinstall:'; $after | Format-Table -AutoSize | Out-String -Width 300
+          'port 19876:'; Get-NetTCPConnection -LocalPort 19876 -ErrorAction SilentlyContinue | Select-Object State, OwningProcess | Format-Table -AutoSize | Out-String
+          & $new uninstall
+          Start-Sleep 2
+          $left = Get-Process quantifai-sync -ErrorAction SilentlyContinue
+          if ($left) { $left | Stop-Process -Force }
+          if ($rc -ne 0) { Write-Error "reinstall exited $rc"; exit 1 }
+          if (-not $ok) { Get-Content "$qs\agent.log" -Tail 20 -ErrorAction SilentlyContinue; Write-Error "health reports '$seen' after reinstall, want v0.0.2-new"; exit 1 }
+          $stale = @($after | Where-Object { $_.ExecutablePath -ne $new -or $before.ProcessId -contains $_.ProcessId })
+          if ($stale.Count) { Write-Error 'old processes still running after reinstall'; exit 1 }
+          if ($after.Count -ne 2) { Write-Error "want a supervisor and an agent after reinstall, found $($after.Count)"; exit 1 }
+          if ($left) { Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
+          'reinstall replaced the running agent: v0.0.2-new, new supervisor and agent, nothing left of the old one'
+          exit 0
       # Self-update end to end: an agent stamped v0.2.9-ci, installed as the
       # logon task with auto-update on, must find the real latest release,
       # replace its own running file, exit to the supervisor, and come back
