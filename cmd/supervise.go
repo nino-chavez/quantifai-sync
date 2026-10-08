@@ -65,7 +65,7 @@ func superviseAgent() int {
 	// One supervisor at a time. A new instance of the logon task waits here
 	// until the one it replaces has exited, so two never run agents side by
 	// side, and it cannot take the handoff from a supervisor still running.
-	if _, err := lockSupervisor(filepath.Join(filepath.Dir(handoff), "supervisor.lock")); err != nil {
+	if err := holdSupervisorLock(filepath.Join(filepath.Dir(handoff), "supervisor.lock")); err != nil {
 		log.Warn("supervisor could not take its lock", map[string]any{"error": err.Error()})
 	}
 	return supervise(exe, []string{"run"}, supervisorRestartDelay, handoff, restartLogonTask, log)
@@ -146,9 +146,24 @@ func handOver(handoff, updatedTo string, restartTask func() error) error {
 	return fmt.Errorf("still running %s after starting a new supervisor", handoverWait)
 }
 
+// supervisorLock keeps the supervisor lock's file reachable. An
+// unreferenced *os.File is closed by its finalizer at some garbage
+// collection, and closing it would release the lock mid-run.
+var supervisorLock *os.File
+
+// holdSupervisorLock takes the supervisor lock at path for the life of the
+// process; the system releases it however the process ends.
+func holdSupervisorLock(path string) error {
+	f, err := lockSupervisor(path)
+	if err != nil {
+		return err
+	}
+	supervisorLock = f
+	return nil
+}
+
 // lockSupervisor takes the supervisor lock at path, blocking until any
-// other supervisor holding it has exited. The lock is held for the life of
-// the process; the system releases it however the process ends.
+// other supervisor holding it has exited.
 func lockSupervisor(path string) (*os.File, error) {
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
 	if err != nil {

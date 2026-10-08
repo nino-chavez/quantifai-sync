@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"testing"
@@ -168,6 +169,35 @@ func TestSupervisorLockIsExclusive(t *testing.T) {
 	case <-time.After(5 * time.Second):
 		t.Fatal("second supervisor still waiting after the first released the lock")
 	}
+}
+
+// The lock outlasts garbage collection: nothing else refers to the file,
+// and a collected *os.File is closed, which would release the lock.
+func TestSupervisorLockSurvivesGC(t *testing.T) {
+	path := t.TempDir() + "/supervisor.lock"
+	if err := holdSupervisorLock(path); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { supervisorLock.Close(); supervisorLock = nil }()
+	for i := 0; i < 5; i++ {
+		runtime.GC()
+		time.Sleep(20 * time.Millisecond)
+	}
+	got := make(chan error, 1)
+	go func() {
+		f, err := lockSupervisor(path)
+		if err == nil {
+			f.Close()
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		t.Fatalf("a second supervisor took the lock after garbage collection (err %v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	supervisorLock.Close()
+	<-got
 }
 
 // If starting a new supervisor fails, this one starts the new agent itself
