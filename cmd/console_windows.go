@@ -23,8 +23,9 @@ var (
 // hideChildWindow; without a console to inherit, each would get a new,
 // visible one.
 func releaseConsole() {
-	hideConsole() // PROBE: hide only, as before; expected to fail
-	_ = freeConsole
+	if freeConsole.Find() == nil {
+		freeConsole.Call()
+	}
 }
 
 // hideConsole hides the console window of an agent run with --no-console
