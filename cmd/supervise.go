@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/quantifai/sync/internal/config"
+	"github.com/quantifai/sync/internal/filelock"
 	"github.com/quantifai/sync/internal/logger"
 	"github.com/quantifai/sync/internal/service"
 	"github.com/quantifai/sync/internal/updater"
@@ -61,6 +62,12 @@ func superviseAgent() int {
 		log.Error("supervisor could not create its handoff folder", map[string]any{"error": err.Error()})
 		return 1
 	}
+	// One supervisor at a time. A new instance of the logon task waits here
+	// until the one it replaces has exited, so two never run agents side by
+	// side, and it cannot take the handoff from a supervisor still running.
+	if _, err := lockSupervisor(filepath.Join(filepath.Dir(handoff), "supervisor.lock")); err != nil {
+		log.Warn("supervisor could not take its lock", map[string]any{"error": err.Error()})
+	}
 	return supervise(exe, []string{"run"}, supervisorRestartDelay, handoff, restartLogonTask, log)
 }
 
@@ -74,11 +81,9 @@ func superviseAgent() int {
 //
 // After an update the running supervisor is still the old binary: the
 // update renamed its file aside. restartTask, when set, asks for a new
-// supervisor on the updated binary. A new supervisor takes the release out
-// of handoff as it starts, so the file disappearing within handoverWait is
-// the proof it is running; this supervisor then returns. If restartTask
-// fails or the file stays, this supervisor starts the new agent itself, as
-// before.
+// supervisor on the updated binary, which ends this one (see handOver). If
+// restartTask fails, or this supervisor is still running after
+// handoverWait, it starts the new agent itself, as before.
 func supervise(exe string, args []string, delay time.Duration, handoff string, restartTask func() error, log *logger.Logger) int {
 	updatedTo := takeHandoff(handoff)
 	if updatedTo != "" {
@@ -105,11 +110,7 @@ func supervise(exe string, args []string, delay time.Duration, handoff string, r
 			if restartTask != nil {
 				log.Info("agent installed an update; restarting the supervisor on the new binary", map[string]any{"release": updatedTo})
 				err := handOver(handoff, updatedTo, restartTask)
-				if err == nil {
-					log.Info("a new supervisor is running; this one is stopping", nil)
-					return 0
-				}
-				log.Warn("could not restart the supervisor; starting the new agent from this one", map[string]any{"error": err.Error()})
+				log.Warn("the supervisor was not replaced; starting the new agent from this one", map[string]any{"error": err.Error()})
 			} else {
 				log.Info("agent installed an update; starting the new binary", map[string]any{"release": updatedTo})
 			}
@@ -124,28 +125,40 @@ func supervise(exe string, args []string, delay time.Duration, handoff string, r
 	}
 }
 
-// handoverWait is how long a supervisor waits for its replacement to take
-// the handoff file.
+// handoverWait is how long a supervisor waits to be replaced after asking
+// for a new one.
 var handoverWait = 30 * time.Second
 
-// handOver leaves updatedTo in handoff for a new supervisor, starts one with
-// restartTask, and waits for it to take the file. A supervisor started by
-// the logon task is usually ended by Task Scheduler during the wait.
+// handOver leaves updatedTo in handoff for a new supervisor and starts one
+// with restartTask. For a supervisor started by the logon task, Task
+// Scheduler ends it during the wait, and the new one, blocked on the
+// supervisor lock until then, takes the handoff. It returns an error if
+// that does not happen: restartTask failed, or this supervisor was not
+// started by the task (the new one waits on the lock instead).
 func handOver(handoff, updatedTo string, restartTask func() error) error {
-	// Written here as well, in case the agent could not: the file's
-	// presence is what the new supervisor's start is measured by.
 	if err := os.WriteFile(handoff, []byte(updatedTo), 0600); err != nil {
 		return err
 	}
 	if err := restartTask(); err != nil {
 		return err
 	}
-	for deadline := time.Now().Add(handoverWait); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
-		if _, err := os.Stat(handoff); os.IsNotExist(err) {
-			return nil
-		}
+	time.Sleep(handoverWait)
+	return fmt.Errorf("still running %s after starting a new supervisor", handoverWait)
+}
+
+// lockSupervisor takes the supervisor lock at path, blocking until any
+// other supervisor holding it has exited. The lock is held for the life of
+// the process; the system releases it however the process ends.
+func lockSupervisor(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0600)
+	if err != nil {
+		return nil, err
 	}
-	return fmt.Errorf("no new supervisor took the handoff within %s", handoverWait)
+	if err := filelock.Lock(f); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return f, nil
 }
 
 // takeHandoff returns the release left in handoff, if any, and removes

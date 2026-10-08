@@ -109,33 +109,11 @@ func TestSuperviseRestartsAtOnceAfterUpdate(t *testing.T) {
 }
 
 // After an update, a supervisor that can start a new one on the updated
-// binary (the Windows logon task) does so and stops, leaving the installed
-// release in the handoff file for the new supervisor.
-func TestSuperviseHandsOverToRestartedSupervisor(t *testing.T) {
-	runs := t.TempDir() + "/runs"
-	handoff := t.TempDir() + "/handoff"
-	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
-	t.Setenv(updater.UpdatedToEnv, "")
-	l, _ := logger.New(logger.LevelError, "")
-
-	// The new supervisor takes the release out of the handoff file.
-	took := ""
-	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
-		took = takeHandoff(handoff)
-		return nil
-	}, l)
-	if code != 0 || took != "v9.9.9" {
-		t.Fatalf("supervise returned %d, new supervisor took %q; want 0 and v9.9.9", code, took)
-	}
-	if got, _ := os.ReadFile(runs); string(got) != "[]" {
-		t.Fatalf("runs received %s, want [] only: the new supervisor starts the next agent", got)
-	}
-}
-
-// If the task was started but no new supervisor took the handoff in time,
-// this supervisor starts the new agent itself rather than leaving nothing
-// running.
-func TestSuperviseRestartsAgentWhenNoSupervisorTakesOver(t *testing.T) {
+// binary (the Windows logon task) leaves the installed release in the
+// handoff file and starts it. Task Scheduler ends a task-started supervisor
+// at that point (Windows CI covers it); one still running after the wait
+// starts the new agent itself.
+func TestSuperviseHandsOverThenFallsBack(t *testing.T) {
 	runs := t.TempDir() + "/runs"
 	handoff := t.TempDir() + "/handoff"
 	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
@@ -144,14 +122,51 @@ func TestSuperviseRestartsAgentWhenNoSupervisorTakesOver(t *testing.T) {
 	defer func(w time.Duration) { handoverWait = w }(handoverWait)
 	handoverWait = 200 * time.Millisecond
 
+	inHandoff := ""
 	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
-		return nil // started, but nothing takes the file
+		b, _ := os.ReadFile(handoff)
+		inHandoff = string(b)
+		return nil
 	}, l)
+	if inHandoff != "v9.9.9" {
+		t.Fatalf("handoff held %q when the new supervisor was started, want v9.9.9", inHandoff)
+	}
 	if got, _ := os.ReadFile(runs); code != 0 || string(got) != "[][v9.9.9]" {
 		t.Fatalf("runs received %s (exit %d), want [][v9.9.9]", got, code)
 	}
 	if _, err := os.Stat(handoff); !os.IsNotExist(err) {
 		t.Fatalf("handoff file left behind (err %v)", err)
+	}
+}
+
+// Only one supervisor holds the lock; a second waits until the first exits.
+func TestSupervisorLockIsExclusive(t *testing.T) {
+	path := t.TempDir() + "/supervisor.lock"
+	first, err := lockSupervisor(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := make(chan error, 1)
+	go func() {
+		f, err := lockSupervisor(path)
+		if err == nil {
+			defer f.Close()
+		}
+		got <- err
+	}()
+	select {
+	case err := <-got:
+		t.Fatalf("second supervisor took the lock while the first held it (err %v)", err)
+	case <-time.After(300 * time.Millisecond):
+	}
+	first.Close()
+	select {
+	case err := <-got:
+		if err != nil {
+			t.Fatalf("second supervisor: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("second supervisor still waiting after the first released the lock")
 	}
 }
 
