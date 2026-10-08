@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"strings"
 	"syscall"
-	"time"
 	"unsafe"
 
 	"golang.org/x/sys/windows"
@@ -57,24 +56,17 @@ func killChildrenWithSupervisor() error {
 	return nil
 }
 
-// taskReplaceWait is how long a supervisor waits, after starting the logon
-// task again, for Task Scheduler to end it.
-const taskReplaceWait = 30 * time.Second
-
 // restartLogonTask starts the logon task again so the supervisor runs the
 // updated binary: Windows has no exec, and this process's own file was
 // renamed aside by the update. The task's StopExisting policy ends this
 // instance and starts a new one from the task's path, which now holds the
-// update; the agent has already exited. It returns nil after waiting to be
-// ended, which only happens when this supervisor was not started by the
-// task (run by hand): the task's own instance is running by then.
+// update; the agent has already exited.
 func restartLogonTask() error {
 	cmd := exec.Command("schtasks", "/run", "/tn", service.WindowsTaskName)
 	hideChildWindow(cmd)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		return fmt.Errorf("schtasks /run: %s: %w", strings.TrimSpace(string(out)), err)
 	}
-	time.Sleep(taskReplaceWait)
 	return nil
 }
 

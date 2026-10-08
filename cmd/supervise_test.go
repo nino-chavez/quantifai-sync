@@ -118,19 +118,40 @@ func TestSuperviseHandsOverToRestartedSupervisor(t *testing.T) {
 	t.Setenv(updater.UpdatedToEnv, "")
 	l, _ := logger.New(logger.LevelError, "")
 
-	restarts := 0
+	// The new supervisor takes the release out of the handoff file.
+	took := ""
 	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
-		restarts++
+		took = takeHandoff(handoff)
 		return nil
 	}, l)
-	if code != 0 || restarts != 1 {
-		t.Fatalf("supervise returned %d after %d restarts, want 0 after 1", code, restarts)
+	if code != 0 || took != "v9.9.9" {
+		t.Fatalf("supervise returned %d, new supervisor took %q; want 0 and v9.9.9", code, took)
 	}
 	if got, _ := os.ReadFile(runs); string(got) != "[]" {
 		t.Fatalf("runs received %s, want [] only: the new supervisor starts the next agent", got)
 	}
-	if got, _ := os.ReadFile(handoff); string(got) != "v9.9.9" {
-		t.Fatalf("handoff holds %q, want v9.9.9 for the new supervisor", got)
+}
+
+// If the task was started but no new supervisor took the handoff in time,
+// this supervisor starts the new agent itself rather than leaving nothing
+// running.
+func TestSuperviseRestartsAgentWhenNoSupervisorTakesOver(t *testing.T) {
+	runs := t.TempDir() + "/runs"
+	handoff := t.TempDir() + "/handoff"
+	t.Setenv("QUANTIFAI_SUPERVISE_HELPER", "update-then-verify:"+runs)
+	t.Setenv(updater.UpdatedToEnv, "")
+	l, _ := logger.New(logger.LevelError, "")
+	defer func(w time.Duration) { handoverWait = w }(handoverWait)
+	handoverWait = 200 * time.Millisecond
+
+	code := supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 20*time.Second, handoff, func() error {
+		return nil // started, but nothing takes the file
+	}, l)
+	if got, _ := os.ReadFile(runs); code != 0 || string(got) != "[][v9.9.9]" {
+		t.Fatalf("runs received %s (exit %d), want [][v9.9.9]", got, code)
+	}
+	if _, err := os.Stat(handoff); !os.IsNotExist(err) {
+		t.Fatalf("handoff file left behind (err %v)", err)
 	}
 }
 

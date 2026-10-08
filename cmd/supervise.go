@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,7 +56,10 @@ func superviseAgent() int {
 	}
 	handoff := service.SupervisorHandoffPath()
 	if err := os.MkdirAll(filepath.Dir(handoff), 0700); err != nil {
-		log.Warn("supervisor could not create its handoff folder", map[string]any{"error": err.Error()})
+		// Without it an update could not hand its release on, and a
+		// misstamped release would be installed again on every start.
+		log.Error("supervisor could not create its handoff folder", map[string]any{"error": err.Error()})
+		return 1
 	}
 	return supervise(exe, []string{"run"}, supervisorRestartDelay, handoff, restartLogonTask, log)
 }
@@ -70,9 +74,11 @@ func superviseAgent() int {
 //
 // After an update the running supervisor is still the old binary: the
 // update renamed its file aside. restartTask, when set, asks for a new
-// supervisor on the updated binary and returns nil once one is starting;
-// this supervisor then returns, leaving the tag in handoff. If it fails,
-// this supervisor starts the new agent itself, as before.
+// supervisor on the updated binary. A new supervisor takes the release out
+// of handoff as it starts, so the file disappearing within handoverWait is
+// the proof it is running; this supervisor then returns. If restartTask
+// fails or the file stays, this supervisor starts the new agent itself, as
+// before.
 func supervise(exe string, args []string, delay time.Duration, handoff string, restartTask func() error, log *logger.Logger) int {
 	updatedTo := takeHandoff(handoff)
 	if updatedTo != "" {
@@ -98,7 +104,7 @@ func supervise(exe string, args []string, delay time.Duration, handoff string, r
 			updatedTo = strings.TrimSpace(string(b))
 			if restartTask != nil {
 				log.Info("agent installed an update; restarting the supervisor on the new binary", map[string]any{"release": updatedTo})
-				err := restartTask()
+				err := handOver(handoff, updatedTo, restartTask)
 				if err == nil {
 					log.Info("a new supervisor is running; this one is stopping", nil)
 					return 0
@@ -116,6 +122,30 @@ func supervise(exe string, args []string, delay time.Duration, handoff string, r
 		})
 		time.Sleep(delay)
 	}
+}
+
+// handoverWait is how long a supervisor waits for its replacement to take
+// the handoff file.
+var handoverWait = 30 * time.Second
+
+// handOver leaves updatedTo in handoff for a new supervisor, starts one with
+// restartTask, and waits for it to take the file. A supervisor started by
+// the logon task is usually ended by Task Scheduler during the wait.
+func handOver(handoff, updatedTo string, restartTask func() error) error {
+	// Written here as well, in case the agent could not: the file's
+	// presence is what the new supervisor's start is measured by.
+	if err := os.WriteFile(handoff, []byte(updatedTo), 0600); err != nil {
+		return err
+	}
+	if err := restartTask(); err != nil {
+		return err
+	}
+	for deadline := time.Now().Add(handoverWait); time.Now().Before(deadline); time.Sleep(100 * time.Millisecond) {
+		if _, err := os.Stat(handoff); os.IsNotExist(err) {
+			return nil
+		}
+	}
+	return fmt.Errorf("no new supervisor took the handoff within %s", handoverWait)
 }
 
 // takeHandoff returns the release left in handoff, if any, and removes
