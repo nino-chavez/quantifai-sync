@@ -53,19 +53,25 @@ func Execute() int {
 
 	case "run":
 		// Explicit "run" subcommand (used by service managers). The Windows
-		// logon task passes --no-console to hide the window it opens, and
-		// --supervise to restart the agent after a crash.
-		supervised := false
+		// logon task passes --no-console to get rid of the console window it
+		// opens, and --supervise to restart the agent after a crash.
+		noConsole, supervised := false, false
 		for _, arg := range os.Args[2:] {
 			switch arg {
 			case "--no-console":
-				hideConsole()
+				noConsole = true
 			case "--supervise":
 				supervised = true
 			}
 		}
 		if supervised {
+			if noConsole {
+				releaseConsole()
+			}
 			return superviseAgent()
+		}
+		if noConsole {
+			hideConsole()
 		}
 		return runAgent()
 
