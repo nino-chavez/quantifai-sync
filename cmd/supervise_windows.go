@@ -70,7 +70,10 @@ func restartLogonTask() error {
 	return nil
 }
 
-// hideChildWindow starts the child without a console window.
+// hideChildWindow starts the child without a console window. Every console
+// program the supervisor starts needs it: the supervisor has released its
+// own console (releaseConsole), so a child without it would open a new,
+// visible one.
 func hideChildWindow(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{CreationFlags: windows.CREATE_NO_WINDOW}
 }
