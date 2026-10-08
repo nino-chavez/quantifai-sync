@@ -69,3 +69,22 @@ func TestSupervisorLogsAgentOutput(t *testing.T) {
 		}
 	}
 }
+
+// A supervisor that panics after redirecting its output must leave the
+// trace in the log. The runtime writes it to the process's standard error
+// handle, not to os.Stderr, and the supervisor has no console to show it.
+func TestSupervisorPanicGoesToLog(t *testing.T) {
+	appData := t.TempDir()
+	sup := exec.Command(os.Args[0], "-test.run=^TestSuperviseHelper$")
+	sup.Env = append(os.Environ(), "QUANTIFAI_SUPERVISE_HELPER=redirect-then-panic", "LOCALAPPDATA="+appData)
+	out, err := sup.CombinedOutput()
+	if err == nil {
+		t.Fatalf("helper did not panic:\n%s", out)
+	}
+	b, _ := os.ReadFile(filepath.Join(appData, "quantifai", "quantifai-sync.log"))
+	for _, want := range []string{"panic: supervisor test panic", "goroutine "} {
+		if !strings.Contains(string(b), want) {
+			t.Errorf("log missing %q\nlog:\n%s\nprocess output:\n%s", want, b, out)
+		}
+	}
+}

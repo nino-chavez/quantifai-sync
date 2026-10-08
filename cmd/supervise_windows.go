@@ -19,6 +19,9 @@ import (
 // redirectOutputToLog points stdout and stderr at service.WindowsLogPath,
 // appending. Children started afterwards inherit it, so the agent's own
 // messages (such as a config problem it is waiting on) land there too.
+// The process's standard handles are pointed there as well: the runtime
+// writes a panic or fatal error trace to the standard error handle, not to
+// os.Stderr, and the supervisor has released its console.
 func redirectOutputToLog() error {
 	path := service.WindowsLogPath()
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
@@ -29,7 +32,10 @@ func redirectOutputToLog() error {
 		return err
 	}
 	os.Stdout, os.Stderr = f, f
-	return nil
+	if err := windows.SetStdHandle(windows.STD_OUTPUT_HANDLE, windows.Handle(f.Fd())); err != nil {
+		return err
+	}
+	return windows.SetStdHandle(windows.STD_ERROR_HANDLE, windows.Handle(f.Fd()))
 }
 
 // killChildrenWithSupervisor puts this process in a job object that kills
