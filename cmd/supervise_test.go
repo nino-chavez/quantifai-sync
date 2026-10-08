@@ -53,6 +53,11 @@ func TestSuperviseHelper(t *testing.T) {
 		os.Setenv("QUANTIFAI_SUPERVISE_HELPER", "echo")
 		l, _ := logger.New(logger.LevelInfo, "")
 		os.Exit(supervise(os.Args[0], []string{"-test.run=^TestSuperviseHelper$"}, 10*time.Millisecond, helperHandoff(), nil, l))
+	case "redirect-then-panic":
+		if err := redirectOutputToLog(); err != nil {
+			os.Exit(2)
+		}
+		panic("supervisor test panic")
 	case "sleep":
 		os.WriteFile(arg, []byte(strconv.Itoa(os.Getpid())), 0600)
 		time.Sleep(60 * time.Second)
