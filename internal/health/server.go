@@ -162,11 +162,20 @@ type Server struct {
 	httpServer *http.Server
 	state      *HealthState
 
+	// ListenFailed, when set, is called once with the error of the first
+	// failed bind in ListenAndServe, before it starts retrying.
+	ListenFailed func(error)
+
 	// mu protects the listener field which is set in Listen and
-	// read in Addr.
+	// read in Addr, and closed, which Shutdown sets.
 	mu       sync.RWMutex
 	listener net.Listener
+	closed   bool
 }
+
+// listenRetryInterval is how often ListenAndServe retries a port it could
+// not bind.
+var listenRetryInterval = 500 * time.Millisecond
 
 // NewServer creates a health Server bound to 127.0.0.1 on the given
 // port.  It does NOT start serving; call ListenAndServe or the
@@ -243,14 +252,38 @@ func (s *Server) Serve() error {
 	return s.httpServer.Serve(ln)
 }
 
-// ListenAndServe is a convenience method that calls Listen then Serve.
-// For production use where you do not need to read Addr() before
-// serving begins.
+// ListenAndServe calls Listen then Serve. For production use where you do
+// not need to read Addr() before serving begins.
+//
+// A port it cannot bind is retried until the bind succeeds or Shutdown is
+// called. On Windows a reinstall starts the new agent while the old one,
+// killed with its supervisor, can still hold the port for a moment; one
+// failed bind left the new agent without a health endpoint for its whole
+// run.
 func (s *Server) ListenAndServe() error {
-	if err := s.Listen(); err != nil {
-		return err
+	for failed := false; ; failed = true {
+		err := s.Listen()
+		if err == nil {
+			break
+		}
+		if !failed && s.ListenFailed != nil {
+			s.ListenFailed(err)
+		}
+		if s.isClosed() {
+			return http.ErrServerClosed
+		}
+		time.Sleep(listenRetryInterval)
+		if s.isClosed() {
+			return http.ErrServerClosed
+		}
 	}
 	return s.Serve()
+}
+
+func (s *Server) isClosed() bool {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	return s.closed
 }
 
 // Addr returns the listener's network address, or the configured
@@ -269,5 +302,8 @@ func (s *Server) Addr() string {
 // Shutdown gracefully shuts down the health server without interrupting
 // any active connections.
 func (s *Server) Shutdown(ctx context.Context) error {
+	s.mu.Lock()
+	s.closed = true
+	s.mu.Unlock()
 	return s.httpServer.Shutdown(ctx)
 }

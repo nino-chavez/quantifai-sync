@@ -131,6 +131,9 @@ func runAgent() int {
 	healthSrv := health.NewServer(cfg.HealthPort, healthState)
 	// Register editor events endpoint for VS Code extension (queues locally)
 	healthSrv.RegisterHandler("/api/v1/editor-events", editor.HandleEditorEvents(log))
+	healthSrv.ListenFailed = func(err error) {
+		log.Warn("health port is taken; retrying until it is free", map[string]any{"error": err.Error()})
+	}
 	go healthSrv.ListenAndServe()
 	defer healthSrv.Shutdown(context.Background())
 

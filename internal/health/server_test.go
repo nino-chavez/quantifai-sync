@@ -3,6 +3,7 @@ package health
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net"
 	"net/http"
@@ -239,5 +240,75 @@ func TestSnapshotReportsProblem(t *testing.T) {
 	b, _ = json.Marshal(h.Snapshot())
 	if strings.Contains(string(b), "problem") || !strings.Contains(string(b), `"status":"ok"`) {
 		t.Errorf("after clearing the problem: %s", b)
+	}
+}
+
+// A port held by another process (the old agent during a reinstall) must
+// not leave the server without an endpoint: it binds once the port frees.
+func TestListenAndServeWaitsForTakenPort(t *testing.T) {
+	old := listenRetryInterval
+	listenRetryInterval = 50 * time.Millisecond
+	defer func() { listenRetryInterval = old }()
+
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	port := holder.Addr().(*net.TCPAddr).Port
+
+	srv := NewServer(port, NewHealthState("v-test"))
+	failed := make(chan error, 2)
+	srv.ListenFailed = func(err error) { failed <- err }
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+	defer srv.Shutdown(context.Background())
+
+	select {
+	case <-failed:
+	case <-time.After(2 * time.Second):
+		t.Fatal("ListenFailed was not called while the port was taken")
+	}
+	holder.Close()
+
+	url := fmt.Sprintf("http://127.0.0.1:%d/healthz", port)
+	deadline := time.Now().Add(3 * time.Second)
+	for {
+		resp, err := http.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("health endpoint never came up after the port was freed: %v", err)
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	if len(failed) != 0 {
+		t.Error("ListenFailed was called more than once")
+	}
+}
+
+func TestShutdownStopsListenRetry(t *testing.T) {
+	old := listenRetryInterval
+	listenRetryInterval = 50 * time.Millisecond
+	defer func() { listenRetryInterval = old }()
+
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer holder.Close()
+	srv := NewServer(holder.Addr().(*net.TCPAddr).Port, NewHealthState("v-test"))
+	done := make(chan error, 1)
+	go func() { done <- srv.ListenAndServe() }()
+	time.Sleep(150 * time.Millisecond)
+	srv.Shutdown(context.Background())
+	select {
+	case err := <-done:
+		if !errors.Is(err, http.ErrServerClosed) {
+			t.Errorf("ListenAndServe returned %v, want http.ErrServerClosed", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ListenAndServe kept retrying after Shutdown")
 	}
 }
