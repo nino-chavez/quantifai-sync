@@ -175,7 +175,48 @@ jobs:
           if ($stale.Count) { Write-Error 'old processes still running after reinstall'; exit 1 }
           if ($after.Count -ne 2) { Write-Error "want a supervisor and an agent after reinstall, found $($after.Count)"; exit 1 }
           if ($left) { Write-Error 'quantifai-sync processes left after uninstall'; exit 1 }
+          Select-String -Path "$qs\agent.log" -Pattern 'health port' -SimpleMatch -ErrorAction SilentlyContinue | ForEach-Object { "agent log: $($_.Line)" }
           'reinstall replaced the running agent: v0.0.2-new, new supervisor and agent, nothing left of the old one'
+          exit 0
+      # The agent starts while something else holds the health port, as the
+      # old agent can for a moment while a reinstall replaces it. Its health
+      # endpoint must come up once the port is free, not stay down for the
+      # whole run.
+      - name: Health port taken when the agent starts
+        shell: pwsh
+        run: |
+          $qs = Join-Path $env:RUNNER_TEMP 'qsp'
+          $exe = Join-Path $qs 'quantifai-sync.exe'
+          New-Item -ItemType Directory -Force (Join-Path $qs 'watch'), "$env:USERPROFILE\.config\quantifai" | Out-Null
+          go build -ldflags "-X github.com/quantifai/sync/cmd.Version=v0.0.3-port" -o $exe .
+          $fwd = $qs -replace '\\', '/'
+          Set-Content "$env:USERPROFILE\.config\quantifai\config.toml" @(
+            "api_url = 'http://127.0.0.1:9'",
+            "watch_dir = '$fwd/watch'",
+            "log_file = '$fwd/agent.log'"
+          )
+          $holder = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, 19876)
+          $holder.Start()
+          'holding 127.0.0.1:19876'
+          & $exe install --api-key ci-not-a-real-key
+          $rc = $LASTEXITCODE
+          Start-Sleep 5
+          $holder.Stop()
+          'released 127.0.0.1:19876'
+          $ok = $false
+          foreach ($i in 1..15) {
+            try { if ((Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 -SkipHttpErrorCheck).version -eq 'v0.0.3-port') { $ok = $true; "health up ${i}s after the port was released"; break } } catch { }
+            Start-Sleep 1
+          }
+          $log = Get-Content "$qs\agent.log" -Raw -ErrorAction SilentlyContinue
+          & $exe uninstall
+          Start-Sleep 2
+          Get-Process quantifai-sync -ErrorAction SilentlyContinue | Stop-Process -Force
+          if ($rc -ne 0) { Write-Error "install exited $rc"; exit 1 }
+          if (-not $ok) { Get-Content "$qs\agent.log" -Tail 20 -ErrorAction SilentlyContinue; Write-Error 'health did not come up after the port was released'; exit 1 }
+          if ($log -notmatch 'health port') { Write-Error 'the agent did not log that the health port was taken'; exit 1 }
+          ($log -split "`n" | Select-String 'health port' | Select-Object -First 1).Line
+          'health came up after the port was released'
           exit 0
       # Self-update end to end: an agent stamped v0.2.9-ci, installed as the
       # logon task with auto-update on, must find the real latest release,
