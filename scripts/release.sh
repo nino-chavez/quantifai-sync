@@ -23,8 +23,13 @@
 #        with a fake key and a dead API URL, updates itself to this version
 #        and installs a byte-identical binary.
 #
+# If step 4 fails, the script undoes it (deletes the release if it was
+# created, then the tag), so a re-run starts clean. A failure in step 5
+# undoes nothing: the release is complete, and the failure needs a look.
+#
 # --dry-run stops after step 3 and keeps the archives. --verify-only runs
-# step 5 for a release that is already published.
+# step 5 for the newest published release; it cannot check an older one,
+# because the self-update check always installs the newest.
 #
 # The Homebrew tap is a separate step: packaging/homebrew/bump-tap.sh.
 #
@@ -149,6 +154,8 @@ self_update_check() {
 }
 
 if [ "$VERIFY_ONLY" -eq 1 ]; then
+    newest=$(gh api "repos/$REPO/releases/latest" --jq .tag_name)
+    [ "$newest" = "$VERSION" ] || die "--verify-only checks the newest release, which is $newest, not $VERSION"
     verify_release "$VERSION"
     echo; echo "$VERSION verified."
     exit 0
@@ -220,9 +227,21 @@ if [ "$YES" -ne 1 ]; then
     read -r -p "Publish $VERSION from ${COMMIT:0:7} to github.com/$REPO? [y/N] " answer
     [ "$answer" = y ] || [ "$answer" = Y ] || die "not published"
 fi
+# Undo a publish that did not finish, so a re-run is not blocked by a tag
+# or a release with missing assets.
+undo_publish() {
+    echo "release: publishing failed; undoing it" >&2
+    if gh release view "$VERSION" -R "$REPO" >/dev/null 2>&1; then
+        gh release delete "$VERSION" -R "$REPO" --yes --cleanup-tag >&2 || true
+    fi
+    git -C "$ROOT" push -q origin ":refs/tags/$VERSION" 2>/dev/null || true
+    git -C "$ROOT" tag -d "$VERSION" >/dev/null 2>&1 || true
+}
+trap 'undo_publish; cleanup' EXIT
 git -C "$ROOT" tag -a "$VERSION" -m "$VERSION" "$COMMIT"
 git -C "$ROOT" push -q origin "$VERSION"
 gh release create "$VERSION" -R "$REPO" --verify-tag --title "$VERSION" --notes-file "$NOTES" "$DIST"/*
+trap cleanup EXIT
 
 verify_release "$VERSION"
 

@@ -16,7 +16,9 @@
 #   5. brew update, then brew fetch the formula with a scratch trust store
 #      (XDG_CONFIG_HOME), so ~/.homebrew/trust.json is never touched.
 #
-# A tap already at the version is left alone.
+# A tap already at the version is left alone. If a run fails after opening
+# its PR, it removes its worktree and local branch and names the PR left
+# open; a later run stops until that PR is merged or closed.
 set -euo pipefail
 
 TAP_REPO="nino-chavez/quantifai-homebrew-tap"
@@ -52,10 +54,26 @@ fi
 for cmd in git gh curl ruby brew shasum; do command -v "$cmd" >/dev/null || die "$cmd is not installed"; done
 
 SCRATCH="$(mktemp -d "${TMPDIR:-/tmp}/quantifai-bump-tap.XXXXXX")"
-trap 'rm -rf "$SCRATCH"' EXIT
 NUM="${VERSION#v}"
 BRANCH="bump/quantifai-sync-$VERSION"
 WT="$TAP/.worktrees/bump-$VERSION"
+MERGED=0 pr_url=""
+# Until the PR is merged, a failure removes this run's worktree and local
+# branch, so a re-run can start clean; an open PR is reported, not closed.
+cleanup() {
+    if [ "$MERGED" -eq 0 ] && [ -d "$WT" ]; then
+        git -C "$TAP" worktree remove --force "$WT" 2>/dev/null || true
+        git -C "$TAP" branch -q -D "$BRANCH" 2>/dev/null || true
+        if [ -n "$pr_url" ]; then
+            echo "bump-tap: $pr_url is still open; merge it once GitGuardian passes, or close it and delete $BRANCH before re-running" >&2
+        fi
+    fi
+    rm -rf "$SCRATCH"
+}
+trap cleanup EXIT
+
+open_pr=$(gh pr list -R "$TAP_REPO" --head "$BRANCH" --state open --json url --jq '.[0].url // empty')
+[ -z "$open_pr" ] || die "a PR for $VERSION is already open: $open_pr (merge or close it first)"
 
 git -C "$TAP" fetch -q --prune origin
 current=$(git -C "$TAP" show origin/main:Formula/quantifai-sync.rb | sed -n 's/^ *version "\(.*\)"/\1/p' | head -1)
@@ -119,7 +137,8 @@ echo "$pr_url"
 step "Wait for GitGuardian, then merge"
 waited=0
 while :; do
-    state=$(gh pr checks "$BRANCH" -R "$TAP_REPO" 2>/dev/null | awk -F'\t' '$1 ~ /GitGuardian/ {print $2}')
+    # gh pr checks exits non-zero while checks are pending or missing.
+    state=$(gh pr checks "$BRANCH" -R "$TAP_REPO" 2>/dev/null | awk -F'\t' '$1 ~ /GitGuardian/ {print $2}' || true)
     case "$state" in
         pass) echo "GitGuardian passed"; break ;;
         fail) die "GitGuardian failed on $pr_url; not merging" ;;
@@ -128,6 +147,7 @@ while :; do
     sleep 10; waited=$((waited + 10))
 done
 gh pr merge "$pr_url" --merge --match-head-commit "$head"
+MERGED=1
 git -C "$TAP" fetch -q --prune origin
 git -C "$TAP" merge-base --is-ancestor "$head" origin/main || die "merged commit is not in the tap's main"
 git -C "$TAP" push -q origin --delete "$BRANCH" 2>/dev/null || true
