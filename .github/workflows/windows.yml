@@ -149,7 +149,7 @@ jobs:
             "watch_dir = '$fwd/watch'",
             "log_file = '$fwd/agent.log'"
           )
-          function Version { try { (Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2).version } catch { '' } }
+          function Version { try { (Invoke-RestMethod http://127.0.0.1:19876/health -TimeoutSec 2 -SkipHttpErrorCheck).version } catch { '' } }
           function WaitVersion($want) { foreach ($i in 1..30) { if ((Version) -eq $want) { return $true }; Start-Sleep 1 }; return $false }
           function Procs { Get-CimInstance Win32_Process -Filter "Name='quantifai-sync.exe'" | Select-Object ProcessId, ParentProcessId, ExecutablePath }
           & $old install --api-key ci-not-a-real-key
@@ -160,15 +160,17 @@ jobs:
           & $new install
           $rc = $LASTEXITCODE
           $ok = WaitVersion 'v0.0.2-new'
+          $seen = Version
           Start-Sleep 2
           $after = @(Procs)
           'after reinstall:'; $after | Format-Table -AutoSize | Out-String -Width 300
+          'port 19876:'; Get-NetTCPConnection -LocalPort 19876 -ErrorAction SilentlyContinue | Select-Object State, OwningProcess | Format-Table -AutoSize | Out-String
           & $new uninstall
           Start-Sleep 2
           $left = Get-Process quantifai-sync -ErrorAction SilentlyContinue
           if ($left) { $left | Stop-Process -Force }
           if ($rc -ne 0) { Write-Error "reinstall exited $rc"; exit 1 }
-          if (-not $ok) { Get-Content "$qs\agent.log" -Tail 20 -ErrorAction SilentlyContinue; Write-Error "health reports '$(Version)' after reinstall, want v0.0.2-new"; exit 1 }
+          if (-not $ok) { Get-Content "$qs\agent.log" -Tail 20 -ErrorAction SilentlyContinue; Write-Error "health reports '$seen' after reinstall, want v0.0.2-new"; exit 1 }
           $stale = @($after | Where-Object { $_.ExecutablePath -ne $new -or $before.ProcessId -contains $_.ProcessId })
           if ($stale.Count) { Write-Error 'old processes still running after reinstall'; exit 1 }
           if ($after.Count -ne 2) { Write-Error "want a supervisor and an agent after reinstall, found $($after.Count)"; exit 1 }
