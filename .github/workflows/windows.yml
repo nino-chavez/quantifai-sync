@@ -24,8 +24,8 @@ jobs:
         run: go test -count=1 ./internal/filelock/ ./internal/git/ ./internal/ingest/ ./internal/updater/ ./internal/service/
       - name: Logon task (verbose, shows whether the task could run here)
         run: go test -count=1 -v -run "TestTask|TestSessionUser" ./internal/service/
-      - name: Supervisor (crash restart, no orphaned agent)
-        run: go test -count=1 -v -run "TestSupervis" ./cmd/
+      - name: Supervisor (crash restart, no orphaned agent, no console)
+        run: go test -count=1 -v -run "TestSupervis|TestReleaseConsole" ./cmd/
       # No API key yet (fresh runner, before any step stores one): the agent
       # must wait for a key, not exit, so the supervisor does not restart it
       # every 10 seconds. The same processes must still be running 25s on.
