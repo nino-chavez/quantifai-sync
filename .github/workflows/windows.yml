@@ -100,6 +100,18 @@ jobs:
           }
           $health | ConvertTo-Json -Compress
           if ($health.version -ne 'v0.0.0-ci') { Write-Error "unexpected version $($health.version)"; exit 1 }
+          # No console: the supervisor the task starts must not keep one. A
+          # console's host process (conhost.exe) is a child of the process it
+          # was created for, so a supervisor with a console has a conhost
+          # child, hidden or not.
+          $sup = (Get-CimInstance Win32_Process -Filter "Name='quantifai-sync.exe'" | Where-Object { $_.CommandLine -like '*--supervise*' } | Select-Object -First 1).ProcessId
+          "supervisor pid: $sup"
+          'console hosts (conhost.exe) and their parents:'
+          Get-CimInstance Win32_Process -Filter "Name='conhost.exe'" | Select-Object ProcessId, ParentProcessId | Format-Table -AutoSize | Out-String
+          $hosts = @(Get-CimInstance Win32_Process -Filter "Name='conhost.exe' AND ParentProcessId=$sup")
+          if (-not $sup) { Write-Error 'no supervisor process found'; exit 1 }
+          if ($hosts.Count -ne 0) { Write-Error "the supervisor still has a console (conhost pid $($hosts.ProcessId -join ', '))"; exit 1 }
+          'the supervisor has no console'
           # Crash restart: kill the agent (the process serving /health); the
           # supervisor must start a new one.
           $agent = (Get-NetTCPConnection -LocalPort 19876 -State Listen).OwningProcess | Select-Object -First 1
