@@ -5,7 +5,7 @@ VERSION     ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo 
 LDFLAGS     := -ldflags "-X github.com/quantifai/sync/cmd.Version=$(VERSION)"
 INSTALL_DIR ?= $(HOME)/.local/bin
 
-.PHONY: build install uninstall test test-race clean cross-build formula pkg
+.PHONY: build install uninstall test test-race clean cross-build formula pkg release bump-tap
 
 ## build: Compile the binary for the current platform
 build:
@@ -53,6 +53,14 @@ cross-build:
 ## formula: Render the Homebrew formula for VERSION into bin/quantifai-sync.rb
 formula:
 	packaging/homebrew/update-formula.sh $(VERSION) bin/quantifai-sync.rb
+
+## release: Build, publish and verify a release (VERSION=vX.Y.Z NOTES=notes.md; see scripts/release.sh)
+release:
+	scripts/release.sh $(VERSION) --notes $(NOTES)
+
+## bump-tap: Move the Homebrew tap to a published release (VERSION=vX.Y.Z)
+bump-tap:
+	packaging/homebrew/bump-tap.sh $(VERSION)
 
 ## pkg: Build macOS .pkg installer (macOS only)
 pkg:
