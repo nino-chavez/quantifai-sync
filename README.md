@@ -1,11 +1,17 @@
 # quantifai-sync
 
+[![Latest release](https://img.shields.io/github/v/release/nino-chavez/quantifai-sync)](https://github.com/nino-chavez/quantifai-sync/releases/latest)
+
 Telemetry sync agent for QuantifAI. Reads local Claude Code session data, parses token counts
 and cost, and streams usage to a QuantifAI dashboard.
 
-> **Status: paused.** QuantifAI stopped active development in 2026. `v0.1.0` is real, tagged,
-> and installable, and the code is kept public because the scrubbing model below is the part
-> worth reading. Nothing here is being maintained — treat it as reference, not a dependency.
+> **Status: active.** The agent runs every day, shipping QuantifAI's own Claude Code usage and
+> commits to the ledger at quantifai.app. Releases follow fixes; the newest is on the
+> [latest release](https://github.com/nino-chavez/quantifai-sync/releases/latest) page
+> (v0.4.10, 2026-11-19), and the Homebrew tap installs it.
+>
+> Self-update is off by default. An installed agent stays on its version until you run
+> `brew upgrade quantifai-sync` or set `auto_update = true` in its config.
 
 ## Install
 
