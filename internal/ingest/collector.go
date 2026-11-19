@@ -23,6 +23,11 @@ type Collector struct {
 	root  string
 	lite  bool
 	files map[string]*fileCache
+	// dedup holds what each session has already counted, keyed by project
+	// directory and session id. It spans all of a session's files, so it is
+	// rebuilt for a whole project whenever one of its files is rewritten or
+	// removed.
+	dedup map[string]*sessionDedup
 }
 
 type fileCache struct {
@@ -30,16 +35,47 @@ type fileCache struct {
 	firstCwd string
 	sessions map[string]*sessionPart
 	order    []string // session ids in first-seen order
+	// pending holds the message row built for each folded line that is not
+	// yet acknowledged, by line start, so a resend carries the same row. A
+	// line counted elsewhere first has no entry and sends nothing.
+	pending map[int64]Message
 }
 
 func newFileCache() *fileCache {
-	return &fileCache{sessions: map[string]*sessionPart{}}
+	return &fileCache{sessions: map[string]*sessionPart{}, pending: map[int64]Message{}}
+}
+
+func (c *Collector) sessionDedup(project, session string) *sessionDedup {
+	k := project + "\x00" + session
+	d := c.dedup[k]
+	if d == nil {
+		d = newSessionDedup()
+		c.dedup[k] = d
+	}
+	return d
+}
+
+// resetProject forgets every cached file under a project directory and the
+// project's count-once state, so the next pass re-reads the whole project in
+// walk order. Offsets are untouched: only unacknowledged lines are sent again.
+func (c *Collector) resetProject(dirName string) {
+	prefix := filepath.Join(c.root, dirName) + string(filepath.Separator)
+	for path := range c.files {
+		if strings.HasPrefix(path, prefix) {
+			delete(c.files, path)
+		}
+	}
+	for k := range c.dedup {
+		if strings.HasPrefix(k, dirName+"\x00") {
+			delete(c.dedup, k)
+		}
+	}
 }
 
 // NewCollector reads session files under root. In lite mode, absolute
 // project paths are cut to their last segment before they leave the machine.
 func NewCollector(root string, lite bool) *Collector {
-	return &Collector{root: root, lite: lite, files: map[string]*fileCache{}}
+	return &Collector{root: root, lite: lite, files: map[string]*fileCache{}, dedup: map[string]*sessionDedup{}}
 }
 
 // Group is one session's full totals plus its messages read this cycle.
@@ -88,6 +124,34 @@ func (c *Collector) Collect(committed func(path string) int64) *Cycle {
 	newMsgs := map[dirtyKey][]Message{}
 
 	for _, p := range projects {
+		// A rewritten or removed file takes its records out of the sessions,
+		// which the count-once state cannot undo: rebuild the whole project.
+		sizes := make(map[string]int64, len(p.paths))
+		statErr := map[string]error{}
+		live := make(map[string]bool, len(p.paths))
+		rebuild := false
+		for _, path := range p.paths {
+			live[path] = true
+			fi, err := os.Stat(path)
+			if err != nil {
+				statErr[path] = err
+				continue
+			}
+			sizes[path] = fi.Size()
+			if fc := c.files[path]; fc != nil && (fi.Size() < fc.parsed || fi.Size() < committed(path)) {
+				rebuild = true
+			}
+		}
+		prefix := filepath.Join(c.root, p.dirName) + string(filepath.Separator)
+		for path := range c.files {
+			if strings.HasPrefix(path, prefix) && !live[path] {
+				rebuild = true
+			}
+		}
+		if rebuild {
+			c.resetProject(p.dirName)
+		}
+
 		for _, path := range p.paths {
 			cyc.Files++
 			fc := c.files[path]
@@ -97,18 +161,22 @@ func (c *Collector) Collect(committed func(path string) int64) *Cycle {
 			}
 			acked := committed(path)
 
-			fi, err := os.Stat(path)
-			if err != nil {
+			if err := statErr[path]; err != nil {
 				cyc.ReadErrors[path] = err
 				continue
 			}
-			size := fi.Size()
+			size := sizes[path]
 			if size < acked || size < fc.parsed {
 				// The file shrank, so it was rewritten: start it over.
 				fc = newFileCache()
 				c.files[path] = fc
 				acked = 0
 				cyc.Offsets[path] = 0
+			}
+			for at := range fc.pending {
+				if at < acked {
+					delete(fc.pending, at)
+				}
 			}
 			start := acked
 			if fc.parsed < start {
@@ -123,12 +191,29 @@ func (c *Collector) Collect(committed func(path string) int64) *Cycle {
 				if u == nil {
 					return
 				}
+				k := dirtyKey{p.dirName, u.SessionID}
 				if lineEnd > fc.parsed {
-					fc.fold(u)
+					// The project's first cwd comes from every record, counted or not,
+					// as in the reference importer.
+					if fc.firstCwd == "" && u.Cwd != "" {
+						fc.firstCwd = u.Cwd
+					}
+					counted := c.sessionDedup(p.dirName, u.SessionID).countOnce(u)
+					if counted == nil {
+						return
+					}
+					fc.fold(counted)
+					if lineStart >= acked {
+						row := counted.MessageRow()
+						fc.pending[lineStart] = row
+						newMsgs[k] = append(newMsgs[k], row)
+					}
+					return
 				}
 				if lineStart >= acked {
-					k := dirtyKey{p.dirName, u.SessionID}
-					newMsgs[k] = append(newMsgs[k], u.MessageRow())
+					if row, ok := fc.pending[lineStart]; ok {
+						newMsgs[k] = append(newMsgs[k], row)
+					}
 				}
 			})
 			if end > fc.parsed {
@@ -202,6 +287,16 @@ func (c *Collector) Collect(committed func(path string) int64) *Cycle {
 	for path := range c.files {
 		if !live[path] {
 			delete(c.files, path)
+		}
+	}
+	// And forget the count-once state of project directories that are gone.
+	dirs := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		dirs[p.dirName] = true
+	}
+	for k := range c.dedup {
+		if dir, _, ok := strings.Cut(k, "\x00"); ok && !dirs[dir] {
+			delete(c.dedup, k)
 		}
 	}
 	return cyc
