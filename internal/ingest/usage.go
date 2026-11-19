@@ -7,11 +7,17 @@ import (
 )
 
 // pricingRates is one set of list prices per 1M tokens. cacheCreation is the
-// 5-minute cache-write rate.
+// 5-minute cache-write rate (1.25x input); cacheCreation1h is the 1-hour rate,
+// twice the input price.
 type pricingRates struct {
-	input, output float64
-	cacheRead     float64
-	cacheCreation float64
+	input, output   float64
+	cacheRead       float64
+	cacheCreation   float64
+	cacheCreation1h float64
+}
+
+func rates(in, out, cacheRead, cacheCreation float64) pricingRates {
+	return pricingRates{in, out, cacheRead, cacheCreation, in * 2}
 }
 
 // pricingRow is one tier of the server's ANTHROPIC_PRICING_TABLE
@@ -26,7 +32,7 @@ type pricingRow struct {
 }
 
 func row(match string, in, out, cacheRead, cacheCreation float64) pricingRow {
-	return pricingRow{match: match, pricingRates: pricingRates{in, out, cacheRead, cacheCreation}}
+	return pricingRow{match: match, pricingRates: rates(in, out, cacheRead, cacheCreation)}
 }
 
 // First match wins, by substring on the lowercased model, so a version comes
@@ -34,6 +40,8 @@ func row(match string, in, out, cacheRead, cacheCreation float64) pricingRow {
 // versions at legacy rates. Unknown models fall back to the sonnet row, as
 // the server does. Keep this in the server table's order and values.
 var pricingTable = []pricingRow{
+	row("fable-5-2", 8, 40, 0.2, 10),
+	row("mythos-5-2", 8, 40, 0.2, 10),
 	row("fable-5-1", 10, 50, 0.25, 12.5),
 	row("mythos-5-1", 10, 50, 0.25, 12.5),
 	row("fable-5", 10, 50, 1, 12.5),
@@ -45,13 +53,13 @@ var pricingTable = []pricingRow{
 	row("opus-4-6", 5, 25, 0.5, 6.25),
 	row("opus-4-5", 5, 25, 0.5, 6.25),
 	row("opus-4", 15, 75, 1.5, 18.75),
-	row("sonnet-5-5", 2, 10, 0.2, 2.5),
+	row("sonnet-5-5", 2, 10, 0.1, 2.5),
 	row("sonnet-5", 2, 10, 0.2, 2.5),
 	{
 		match:          "haiku-5-5",
-		pricingRates:   pricingRates{0.1, 0.5, 0.01, 0.125},
+		pricingRates:   rates(0.1, 0.5, 0.01, 0.125),
 		longPromptOver: 100_000,
-		longPrompt:     pricingRates{0.5, 2.5, 0.05, 0.625},
+		longPrompt:     rates(0.5, 2.5, 0.05, 0.625),
 	},
 	row("haiku-4-5", 1, 5, 0.1, 1.25),
 	row("opus", 15, 75, 1.5, 18.75),
@@ -65,7 +73,11 @@ var fallbackRow = pricingTable[len(pricingTable)-1]
 // float64() so the compiler cannot fuse it into a multiply-add on arm64;
 // a fused result differs from JavaScript's in the last bits, and the rows
 // must match the reference importer's exactly.
-func EstimateCost(model string, in, out, cacheRead, cacheCreation int64) float64 {
+//
+// cacheCreation counts every cache-write token; cacheCreation1h is its 1-hour
+// share, priced at the 1-hour rate (capped at cacheCreation). The rest is
+// priced as 5-minute writes.
+func EstimateCost(model string, in, out, cacheRead, cacheCreation, cacheCreation1h int64) float64 {
 	m := strings.ToLower(model)
 	tier := fallbackRow
 	for _, r := range pricingTable {
@@ -81,14 +93,24 @@ func EstimateCost(model string, in, out, cacheRead, cacheCreation int64) float64
 	t1 := float64(float64(in) / 1_000_000 * rates.input)
 	t2 := float64(float64(out) / 1_000_000 * rates.output)
 	t3 := float64(float64(cacheRead) / 1_000_000 * rates.cacheRead)
-	t4 := float64(float64(cacheCreation) / 1_000_000 * rates.cacheCreation)
-	return t1 + t2 + t3 + t4
+	oneHour := cacheCreation1h
+	if oneHour > cacheCreation {
+		oneHour = cacheCreation
+	}
+	fiveMinute := cacheCreation - oneHour
+	t4 := float64(float64(fiveMinute) / 1_000_000 * rates.cacheCreation)
+	t5 := float64(float64(oneHour) / 1_000_000 * rates.cacheCreation1h)
+	return t1 + t2 + t3 + t4 + t5
 }
 
 // Usage is one cost-bearing assistant record (server: UsageMessage).
 type Usage struct {
-	SessionID     string
-	MessageID     string // the record's uuid, not message.id
+	SessionID string
+	MessageID string // the record's uuid, not message.id
+	// ResponseKey names the API response the record belongs to:
+	// message.id + "|" + requestId, or "uuid:" + uuid when either is missing.
+	// Claude Code writes one response as one record per content block.
+	ResponseKey   string
 	Timestamp     string
 	Model         string
 	Cwd           string // "" when absent
@@ -97,18 +119,22 @@ type Usage struct {
 	OutputTokens  int64
 	CacheRead     int64
 	CacheCreation int64
-	CostUSD       float64
-	ToolNames     []string
+	// CacheCreation1h is the 1-hour share of CacheCreation (0 without a breakdown).
+	CacheCreation1h int64
+	CostUSD         float64
+	ToolNames       []string
 }
 
 type rawRecord struct {
 	Type       string  `json:"type"`
 	SessionID  string  `json:"sessionId"`
 	UUID       string  `json:"uuid"`
+	RequestID  string  `json:"requestId"`
 	Timestamp  string  `json:"timestamp"`
 	Cwd        *string `json:"cwd"`
 	Entrypoint *string `json:"entrypoint"`
 	Message    *struct {
+		ID      string          `json:"id"`
 		Model   *string         `json:"model"`
 		Content json.RawMessage `json:"content"`
 		Usage   *struct {
@@ -116,6 +142,9 @@ type rawRecord struct {
 			OutputTokens  int64 `json:"output_tokens"`
 			CacheRead     int64 `json:"cache_read_input_tokens"`
 			CacheCreation int64 `json:"cache_creation_input_tokens"`
+			Breakdown     *struct {
+				OneHour int64 `json:"ephemeral_1h_input_tokens"`
+			} `json:"cache_creation"`
 		} `json:"usage"`
 	} `json:"message"`
 }
@@ -146,17 +175,27 @@ func ExtractUsage(line []byte) *Usage {
 	if r.Message.Model != nil {
 		model = *r.Message.Model
 	}
+	var oneHour int64
+	if u.Breakdown != nil {
+		oneHour = u.Breakdown.OneHour
+	}
+	responseKey := "uuid:" + r.UUID
+	if r.Message.ID != "" && r.RequestID != "" {
+		responseKey = r.Message.ID + "|" + r.RequestID
+	}
 	msg := &Usage{
-		SessionID:     r.SessionID,
-		MessageID:     r.UUID,
-		Timestamp:     r.Timestamp,
-		Model:         model,
-		InputTokens:   u.InputTokens,
-		OutputTokens:  u.OutputTokens,
-		CacheRead:     u.CacheRead,
-		CacheCreation: u.CacheCreation,
-		CostUSD:       EstimateCost(model, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheCreation),
-		ToolNames:     toolNames(r.Message.Content),
+		SessionID:       r.SessionID,
+		MessageID:       r.UUID,
+		ResponseKey:     responseKey,
+		Timestamp:       r.Timestamp,
+		Model:           model,
+		InputTokens:     u.InputTokens,
+		OutputTokens:    u.OutputTokens,
+		CacheRead:       u.CacheRead,
+		CacheCreation:   u.CacheCreation,
+		CacheCreation1h: oneHour,
+		CostUSD:         EstimateCost(model, u.InputTokens, u.OutputTokens, u.CacheRead, u.CacheCreation, oneHour),
+		ToolNames:       toolNames(r.Message.Content),
 	}
 	if r.Cwd != nil {
 		msg.Cwd = *r.Cwd
