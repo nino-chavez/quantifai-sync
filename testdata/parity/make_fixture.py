@@ -50,8 +50,8 @@ write(f'{A}/s1.jsonl', [
     asst('s1', 'a1-1', '2026-10-01T10:00:00.000Z', 'claude-sonnet-4-6', u(3, 1250, 22113, 4517), cwd='/Users/test/repo-alpha', entry='cli', tools=['Bash']),
     asst('s1', 'a1-2', '2026-10-01T10:01:00.000Z', 'claude-opus-4-6', u(11, 999, 31337, 2), cwd='/Users/test/repo-alpha', tools=['Bash', 'Edit']),
     asst('s1', 'a1-3', '2026-10-01T10:02:00.000Z', 'claude-opus-4-6', u(1, 1), cwd='/Users/test/repo-alpha'),
-    # Same uuid as a subagent record: one messages row survives server-side,
-    # but the session totals count both, as the reference importer does.
+    # Same uuid as the subagent record above: the same record copied into a
+    # second file of the session. It is counted once, wherever it appears.
     asst('s1', 'a1-dup', '2026-10-01T10:06:00.000Z', 'claude-haiku-4-5-20251001', u(7, 3), cwd='/Users/test/repo-alpha'),
     asst('s1', 'no-usage', '2026-10-01T10:03:00.000Z', 'claude-opus-4-6', None),
     {'type': 'assistant', 'sessionId': 's1', 'uuid': 'null-usage', 'timestamp': '2026-10-01T10:03:30.000Z', 'message': {'model': 'claude-opus-4-6', 'usage': None}},
@@ -85,6 +85,44 @@ write(f'{C}/s4.jsonl', [
 # A session id that also appears in another project directory.
 write(f'{C}/shared.jsonl', [
     asst('s3', 'c3-1', '2026-10-04T02:00:00.000Z', 'claude-sonnet-4-6', u(3, 3)),
+])
+
+# One API response that Claude Code wrote as one record per content block:
+# each record has its own uuid but the same message.id and requestId. Usage is
+# counted once per response. Older Claude Code versions wrote a partial output
+# count on the earlier records, so each record carries only the increase over
+# the response's largest values so far.
+def split(sid, uuid, ts, model, usage, mid, rid, tools=()):
+    r = asst(sid, uuid, ts, model, usage, cwd='/Users/test/repo-delta', tools=tools)
+    if mid is not None: r['message']['id'] = mid
+    if rid is not None: r['requestId'] = rid
+    return r
+
+def cc(i, o, cr, c5, c1):
+    x = u(i, o, cr, c5 + c1)
+    x['cache_creation'] = {'ephemeral_5m_input_tokens': c5, 'ephemeral_1h_input_tokens': c1}
+    return x
+
+D = '-Users-test-repo-delta'
+# The subagent directory sorts before s5.jsonl, so this copy of d5-3 is read first.
+write(f'{D}/s5/subagents/agent-1.jsonl', [
+    split('s5', 'd5-3', '2026-10-06T09:03:00.000Z', 'claude-sonnet-5-5', cc(4, 40, 4000, 0, 400), 'msg_d3', 'req_d3'),
+])
+write(f'{D}/s5.jsonl', [
+    # Identical usage on both records of one response.
+    split('s5', 'd5-1a', '2026-10-06T09:00:00.000Z', 'claude-opus-5-5', cc(2, 300, 50000, 500, 1500), 'msg_d1', 'req_d1'),
+    split('s5', 'd5-1b', '2026-10-06T09:00:01.000Z', 'claude-opus-5-5', cc(2, 300, 50000, 500, 1500), 'msg_d1', 'req_d1', tools=['Bash']),
+    # A partial output count on the first record, the full count on the second.
+    split('s5', 'd5-2a', '2026-10-06T09:01:00.000Z', 'claude-fable-5-2', cc(3, 1, 80000, 0, 2500), 'msg_d2', 'req_d2'),
+    split('s5', 'd5-2b', '2026-10-06T09:01:01.000Z', 'claude-fable-5-2', cc(3, 281, 80000, 0, 2500), 'msg_d2', 'req_d2', tools=['Edit']),
+    split('s5', 'd5-3', '2026-10-06T09:03:00.000Z', 'claude-sonnet-5-5', cc(4, 40, 4000, 0, 400), 'msg_d3', 'req_d3'),
+    # No requestId: each record is its own response.
+    split('s5', 'd5-4', '2026-10-06T09:04:00.000Z', 'claude-mythos-5-2', u(5, 50, 500, 50), 'msg_d4', None),
+    split('s5', 'd5-5', '2026-10-06T09:04:01.000Z', 'claude-mythos-5-2', u(5, 50, 500, 50), 'msg_d4', None),
+    # A 1-hour figure larger than the total is capped at the total.
+    split('s5', 'd5-6', '2026-10-06T09:05:00.000Z', 'claude-opus-5-5',
+          {'input_tokens': 1, 'output_tokens': 1, 'cache_read_input_tokens': 0, 'cache_creation_input_tokens': 10,
+           'cache_creation': {'ephemeral_5m_input_tokens': 0, 'ephemeral_1h_input_tokens': 25}}, 'msg_d6', 'req_d6'),
 ])
 
 os.makedirs(os.path.join(root, '-Users-test-empty'), exist_ok=True)
